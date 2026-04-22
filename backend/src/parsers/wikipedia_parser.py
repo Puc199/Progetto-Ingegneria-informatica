@@ -1,42 +1,64 @@
 import requests
 from bs4 import BeautifulSoup
+import re
 
-def parse_wikipedia(url: str):
+def parse_wikipedia(url: str) -> dict:
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
     }
 
-    # 1. Scarica la pagina
-    response = requests.get(url, headers=headers)
-    html_content = response.text
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        return {"error": f"URL non raggiungibile: {e}"}
 
-    # 2. Analizza l'HTML
+    html_content = response.text
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    # 3. Trova il titolo
     title_tag = soup.find('h1', id='firstHeading')
     title = title_tag.text.strip() if title_tag else "Titolo non trovato"
 
-    # 4. Trova il contenitore universale del testo di Wikipedia
     content_div = soup.find('div', class_='mw-parser-output')
-    
     parsed_text = ""
+
     if content_div:
-        # PULIZIA DEL RUMORE (fondamentale per il progetto!)
-        # Rimuove tabelle laterali (sinottico per l'Italia, infobox per l'Inglese) e menu di navigazione
-        for box in content_div.find_all(['table', 'div'], class_=['infobox', 'sinottico', 'navbox', 'metadata']):
+        # Rimuovi rumore
+        for box in content_div.find_all(['table', 'div'], class_=[
+            'infobox', 'sinottico', 'navbox', 'metadata',
+            'mw-references-wrap', 'reflist', 'sidebar'
+        ]):
             box.decompose()
-            
-        # Rimuove i numeretti delle note (es. [1]) e i tastini "modifica"
         for ref in content_div.find_all(['sup', 'span'], class_=['reference', 'mw-editsection']):
             ref.decompose()
-            
-        # 5. Estrai tutti i paragrafi puliti
-        paragraphs = content_div.find_all('p')
-        
-        # Filtriamo i paragrafi vuoti e li uniamo con due "a capo" per formare il testo finale
-        testi_validi = [p.text.strip() for p in paragraphs if p.text.strip() != ""]
-        parsed_text = "\n\n".join(testi_validi)
+
+        # Sezioni finali da escludere
+        STOP_SECTIONS = {'note', 'references', 'bibliography', 'bibliography',
+                         'see also', 'voci correlate', 'bibliografia',
+                         'collegamenti esterni', 'external links'}
+
+        lines = []
+        stop = False
+        for tag in content_div.find_all(['h2', 'h3', 'h4', 'p', 'ul', 'ol']):
+            if tag.name in ['h2', 'h3', 'h4']:
+                heading_text = tag.get_text().strip().lower()
+                # Rimuove "[modifica | modifica wikitesto]"
+                heading_text = re.sub(r'\[.*?\]', '', heading_text).strip()
+                if heading_text in STOP_SECTIONS:
+                    stop = True
+                if stop:
+                    continue
+                level = int(tag.name[1])
+                lines.append(f"\n{'#' * level} {tag.get_text(separator=' ').strip()}\n")
+            elif tag.name == 'p' and not stop:
+                text = tag.get_text().strip()
+                if text:
+                    lines.append(text)
+            elif tag.name in ['ul', 'ol'] and not stop:
+                for li in tag.find_all('li', recursive=False):
+                    lines.append(f"- {li.get_text().strip()}")
+
+        parsed_text = "\n\n".join(lines)
 
     return {
         "url": url,
