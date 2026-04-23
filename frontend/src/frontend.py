@@ -65,9 +65,10 @@ def home(request: Request):
     domains, gs_urls, errors = load_domains_and_gs_urls()
 
     return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
+        request,
+        "index.html",
+        {
+            "request": request,
             "domains": domains,
             "gs_urls": gs_urls,
             "parse_result": None,
@@ -87,9 +88,10 @@ def parse_ui(request: Request, url: str = Form(...)):
         errors.append(f"Errore parse: {parse_error}")
 
     return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
+        request,
+        "index.html",
+        {
+            "request": request,
             "domains": domains,
             "gs_urls": gs_urls,
             "parse_result": parse_result,
@@ -125,9 +127,10 @@ def evaluate_ui(request: Request, gs_url: str = Form(...)):
             errors.append(f"Errore evaluate: {eval_error}")
 
     return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={
+        request,
+        "index.html",
+        {
+            "request": request,
             "domains": domains,
             "gs_urls": gs_urls,
             "parse_result": parse_result,
