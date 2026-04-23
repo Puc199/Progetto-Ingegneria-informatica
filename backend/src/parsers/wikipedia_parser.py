@@ -4,6 +4,7 @@ from src.parsers.base_parser import fetch_html, make_soup, extract_page_title, b
 
 
 STOP_HEADINGS = {
+    #Italiano
     "note",
     "note e riferimenti",
     "riferimenti",
@@ -20,7 +21,30 @@ STOP_HEADINGS = {
     "wikizionario",
     "wikinotizie",
     "portale",
-    "categorie"
+    "categorie",
+
+    # English
+    "notes",
+    "references",
+    "bibliography",
+    "further reading",
+    "external links",
+    "see also",
+    "navigation",
+    "related pages",
+    "authority control",
+    "portal",
+    "categories",
+    "sister projects",
+    "wikisource",
+    "wikiquote",
+    "wiktionary",
+    "wikinews",
+    "wikibooks",
+    "wikiversity",
+    "wikivoyage",
+    "wikimedia commons",
+    "commons"
 }
 
 
@@ -78,6 +102,10 @@ def normalize_text(text: str) -> str:
     text = text.replace("\xa0", " ")
     text = re.sub(r"\[[0-9]+\]", "", text)
     text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([(\[])\s+", r"\1", text)
+    text = re.sub(r"\s+([)\]])", r"\1", text)
+    text = re.sub(r"\.\.\.+", "...", text)
     return text.strip()
 
 
@@ -123,7 +151,7 @@ def clean_output(text: str) -> str:
             continue
         if low.startswith("coordinate"):
             continue
-        if "usa l'anteprima" in low or "usa l'anteprima" in low:
+        if "usa l'anteprima" in low:
             continue
         if low.startswith("wikipedia:"):
             continue
@@ -154,16 +182,12 @@ def is_stop_heading(text: str) -> bool:
 
 
 def extract_text(el: Tag) -> str:
-    text = normalize_text(el.get_text(" ", strip=True))
-    # Limita la lunghezza massima del paragrafo
-    if len(text) > 500:
-        text = text[:500] + "..."
-    return text
+    return normalize_text(el.get_text(" ", strip=True))
 
 
 def is_good_paragraph(el: Tag) -> bool:
     text = extract_text(el)
-    if len(text) < 30:
+    if len(text) < 15:
         return False
     
     # Evita paragrafi che sembrano didascalie o citazioni brevi
@@ -176,24 +200,31 @@ def is_good_paragraph(el: Tag) -> bool:
 def parse_list(tag: Tag) -> list[str]:
     items = []
     for li in tag.find_all("li", recursive=False):
-        li_text = extract_text(li)
+        li_text = clean_output(extract_text(li))
         if li_text and len(li_text) > 5 and len(li_text) < 200:
             items.append(f"- {li_text}")
     return items[:5]  # Massimo 5 elementi per lista
 
 
 def parse_section_children(container: Tag, blocks: list[str]) -> bool:
-    for node in container.children:
+    for node in container.find_all(["h2", "h3", "h4", "p", "ul", "ol"]):
         if not isinstance(node, Tag):
             continue
 
-        # Skip blocchi rumorosi
-        classes = node.get("class", [])
-        if any(c in classes for c in ["navbox", "infobox", "gallery", "sidebar"]):
+        # salta elementi dentro blocchi rumorosi
+        skip_node = False
+        for parent in node.parents:
+            if parent == container:
+                break
+            parent_classes = parent.get("class", [])
+            if any(c in parent_classes for c in ["navbox", "infobox", "gallery", "sidebar", "reflist"]):
+                skip_node = True
+                break
+        if skip_node:
             continue
 
         if node.name in {"h2", "h3", "h4"}:
-            heading = extract_text(node)
+            heading = clean_output(extract_text(node))
             if not heading:
                 continue
 
@@ -205,7 +236,9 @@ def parse_section_children(container: Tag, blocks: list[str]) -> bool:
 
         if node.name == "p":
             if is_good_paragraph(node):
-                blocks.append(extract_text(node))
+                text = clean_output(extract_text(node))
+                if text:
+                    blocks.append(text)
             continue
 
         if node.name in {"ul", "ol"}:
@@ -214,22 +247,11 @@ def parse_section_children(container: Tag, blocks: list[str]) -> bool:
                 blocks.extend(list_items)
             continue
 
-        if node.name == "section":
-            should_stop = parse_section_children(node, blocks)
-            if should_stop:
-                return True
-
-        # Skip altri elementi
-        if node.name in {"div", "span"}:
-            classes = node.get("class", [])
-            if "thumb" in classes or "gallery" in classes:
-                continue
-
     return False
 
 
-def parse_wikipedia(url: str) -> dict:
-    html = fetch_html(url)
+def parse_wikipedia(url: str, htmltext: str | None = None) -> dict:
+    html = htmltext if htmltext is not None else fetch_html(url)
     soup = make_soup(html)
 
     title = extract_page_title(soup)
@@ -248,8 +270,8 @@ def parse_wikipedia(url: str) -> dict:
 
     parser_output = content_root.select_one(".mw-parser-output") or content_root
 
-    blocks = []
+    blocks = [f"# {title}"]
     parse_section_children(parser_output, blocks)
-    parsedtext = clean_output("\n\n".join(blocks))
+    parsedtext = clean_output("\n\n".join(blocks).strip())
 
     return build_result(url, "wikipedia.org", title, html, parsedtext)

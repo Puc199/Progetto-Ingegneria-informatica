@@ -4,9 +4,7 @@ from src.schemas import ParsePostRequest
 import json
 import os
 
-
 app = FastAPI(title="Pipeline di Parsing Web")
-
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DOMAINS_FILE = os.path.join(BASE_DIR, "domains.json")
@@ -57,6 +55,7 @@ def parse_get(url: str):
         "url": result.get("url"),
         "domain": result.get("domain"),
         "title": result.get("title"),
+        "htmltext": result.get("htmltext"),
         "parsedtext": result.get("parsedtext"),
     }
 
@@ -72,7 +71,12 @@ def parse_post(body: ParsePostRequest):
         )
 
     try:
-        result = parser(body.url)
+        result = parser(body.url, htmltext=body.htmltext)
+    except TypeError:
+        raise HTTPException(
+            status_code=500,
+            detail="Il parser non supporta il parametro htmltext. Aggiorna la firma del parser."
+        )
     except Exception as e:
         raise HTTPException(
             status_code=500,
@@ -95,5 +99,6 @@ def parse_post(body: ParsePostRequest):
         "url": result.get("url"),
         "domain": result.get("domain"),
         "title": result.get("title"),
+        "htmltext": result.get("htmltext"),
         "parsedtext": result.get("parsedtext"),
     }
