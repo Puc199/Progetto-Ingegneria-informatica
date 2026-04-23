@@ -1,119 +1,50 @@
 <!DOCTYPE html>
-<html lang="it">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Frontend Esonero 1</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            margin: 30px;
-            background: #f4f4f4;
-            color: #222;
-        }
-        h1, h2, h3 {
-            color: #1f3c88;
-        }
-        .box {
-            background: white;
-            padding: 20px;
-            margin-bottom: 20px;
-            border-radius: 10px;
-            box-shadow: 0 0 8px rgba(0,0,0,0.08);
-        }
-        textarea, input, select {
-            width: 100%;
-            margin-top: 8px;
-            margin-bottom: 12px;
-            padding: 10px;
-            font-size: 14px;
-        }
-        button {
-            background: #1f3c88;
-            color: white;
-            border: none;
-            padding: 10px 16px;
-            border-radius: 6px;
-            cursor: pointer;
-        }
-        pre {
-            white-space: pre-wrap;
-            word-wrap: break-word;
-            background: #f8f8f8;
-            padding: 12px;
-            border-radius: 8px;
-            overflow-x: auto;
-        }
-        .error {
-            color: darkred;
-            font-weight: bold;
-        }
-    </style>
+    <title>Web Parser UI</title>
+    <meta charset="utf-8">
 </head>
 <body>
-    <h1>Web UI - Esonero 1</h1>
-
+    <h1>Pipeline di Parsing Web</h1>
+    
     {% if error %}
-        <div class="box">
-            <p class="error">Errore: {{ error }}</p>
-        </div>
+        <p style="color: red;">{{ error }}</p>
     {% endif %}
-
-    <div class="box">
-        <h2>Parsing manuale URL</h2>
-        <form action="/parse-ui" method="post">
-            <label for="url">Inserisci URL</label>
-            <input type="text" id="url" name="url" placeholder="https://..." required>
-            <button type="submit">Esegui parsing</button>
-        </form>
-    </div>
-
-    <div class="box">
-        <h2>Test rapido con Gold Standard</h2>
-        <form action="/evaluate-ui" method="post">
-            <label for="gs_url">Seleziona un URL del GS</label>
-            <select id="gs_url" name="gs_url" required>
-                <option value="">-- Seleziona un URL --</option>
-                {% for url in gs_urls %}
-                    <option value="{{ url }}">{{ url }}</option>
-                {% endfor %}
-            </select>
-            <button type="submit">Valuta parser su GS</button>
-        </form>
-    </div>
-
+    
+    <h2>Parse URL</h2>
+    <form action="/parse-ui" method="post">
+        <input type="url" name="url" placeholder="https://it.wikipedia.org/wiki/Minerva" required style="width: 400px;">
+        <button type="submit">Parse</button>
+    </form>
+    
+    <h2>Evaluate GS URL</h2>
+    <form action="/evaluate-ui" method="post">
+        <select name="gs_url" style="width: 400px;">
+            {% for url in gs_urls %}
+                <option value="{{ url }}">{{ url }}</option>
+            {% else %}
+                <option disabled>No GS URLs available</option>
+            {% endfor %}
+        </select>
+        <button type="submit">Evaluate</button>
+    </form>
+    
     {% if parse_result %}
-    <div class="box">
-        <h2>Risultato Parsing</h2>
+        <h2>Parse Result</h2>
         <p><strong>URL:</strong> {{ parse_result.url }}</p>
-        <p><strong>Dominio:</strong> {{ parse_result.domain }}</p>
-        <p><strong>Titolo:</strong> {{ parse_result.title }}</p>
-
-        <h3>HTML Text</h3>
-        <pre>{{ parse_result.htmltext }}</pre>
-
-        <h3>Parsed Text</h3>
+        <p><strong>Domain:</strong> {{ parse_result.domain }}</p>
+        <p><strong>Title:</strong> {{ parse_result.title }}</p>
         <pre>{{ parse_result.parsedtext }}</pre>
-    </div>
     {% endif %}
-
+    
     {% if gold_result %}
-    <div class="box">
         <h2>Gold Standard</h2>
-        <p><strong>URL:</strong> {{ gold_result.url }}</p>
-        <p><strong>Dominio:</strong> {{ gold_result.domain }}</p>
-        <p><strong>Titolo:</strong> {{ gold_result.title }}</p>
-
-        <h3>Gold Text</h3>
-        <pre>{{ gold_result.goldtext }}</pre>
-    </div>
+        <pre>{{ gold_result }}</pre>
     {% endif %}
-
+    
     {% if eval_result %}
-    <div class="box">
-        <h2>Valutazione</h2>
+        <h2>Evaluation</h2>
         <pre>{{ eval_result }}</pre>
-    </div>
     {% endif %}
 </body>
 </html>
