@@ -9,13 +9,14 @@ PARSERS = {
 }
 
 def get_domain(url: str) -> str:
-    hostname = urlparse(url).netloc.lower()
-    hostname = hostname.replace("www.", "")
+    hostname = (urlparse(url).hostname or "").lower()
+    if hostname.startswith("www."):
+        hostname = hostname[4:]
     return hostname
 
 def get_parser(url: str):
     domain = get_domain(url)
-    for key in PARSERS:
-        if key in domain:
-            return PARSERS[key], domain
+    for key, parser in PARSERS.items():
+        if domain == key or domain.endswith("." + key):
+            return parser, domain
     return None, domain
