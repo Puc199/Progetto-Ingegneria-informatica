@@ -4,7 +4,7 @@ from fastapi.templating import Jinja2Templates
 import requests
 
 app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory="src/templates")
 
 API_BASE_URL = "http://backend:8003"
 
