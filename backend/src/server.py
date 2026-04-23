@@ -14,7 +14,8 @@ DOMAINS_FILE = os.path.join(BASE_DIR, "domains.json")
 def get_domains():
     try:
         with open(DOMAINS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            domains = json.load(f)
+        return {"domains": domains}
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="File domains.json non trovato.")
     except json.JSONDecodeError:
