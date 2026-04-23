@@ -1,6 +1,6 @@
 import re
-import requests
-from bs4 import BeautifulSoup, Tag
+from bs4 import Tag
+from src.parsers.base_parser import fetch_html, make_soup, extract_page_title, build_result
 
 
 STOP_HEADINGS = {
@@ -15,6 +15,12 @@ STOP_HEADINGS = {
     "navigazione",
     "pagine correlate",
     "controllo di autorità",
+    "wikisource",
+    "wikiquote",
+    "wikizionario",
+    "wikinotizie",
+    "portale",
+    "categorie"
 }
 
 
@@ -223,33 +229,18 @@ def parse_section_children(container: Tag, blocks: list[str]) -> bool:
 
 
 def parse_wikipedia(url: str) -> dict:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; WikipediaParser/1.0)"
-    }
+    html = fetch_html(url)
+    soup = make_soup(html)
 
-    response = requests.get(url, headers=headers, timeout=20)
-    response.raise_for_status()
-
-    html = response.text
-    soup = BeautifulSoup(html, "html.parser")
-
-    title = ""
-    if soup.title:
-        title = soup.title.get_text(strip=True)
-        title = re.sub(r"\s*-\s*Wikipedia.*$", "", title).strip()
+    title = extract_page_title(soup)
+    title = re.sub(r"\s*-\s*Wikipedia.*$", "", title).strip()
 
     content_root = soup.select_one("#mw-content-text")
     if content_root is None:
         content_root = soup.select_one(".mw-parser-output")
 
     if content_root is None:
-        return {
-            "url": url,
-            "domain": "wikipedia.org",
-            "title": title,
-            "htmltext": html,
-            "parsedtext": "",
-        }
+        return build_result(url, "wikipedia.org", title, html, "")
 
     for selector in REMOVE_SELECTORS:
         for tag in content_root.select(selector):
@@ -261,10 +252,4 @@ def parse_wikipedia(url: str) -> dict:
     parse_section_children(parser_output, blocks)
     parsedtext = clean_output("\n\n".join(blocks))
 
-    return {
-        "url": url,
-        "domain": "wikipedia.org",
-        "title": title,
-        "htmltext": html,
-        "parsedtext": parsedtext,
-    }
+    return build_result(url, "wikipedia.org", title, html, parsedtext)
