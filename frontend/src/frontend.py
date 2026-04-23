@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 import requests
 
+
 app = FastAPI()
 templates = Jinja2Templates(directory="src/templates")
 
@@ -64,9 +65,9 @@ def home(request: Request):
     domains, gs_urls, errors = load_domains_and_gs_urls()
 
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "domains": domains,
             "gs_urls": gs_urls,
             "parse_result": None,
@@ -86,9 +87,9 @@ def parse_ui(request: Request, url: str = Form(...)):
         errors.append(f"Errore parse: {parse_error}")
 
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "domains": domains,
             "gs_urls": gs_urls,
             "parse_result": parse_result,
@@ -124,9 +125,9 @@ def evaluate_ui(request: Request, gs_url: str = Form(...)):
             errors.append(f"Errore evaluate: {eval_error}")
 
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "domains": domains,
             "gs_urls": gs_urls,
             "parse_result": parse_result,
