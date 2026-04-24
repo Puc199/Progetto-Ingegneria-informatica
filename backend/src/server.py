@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from src.parsers.registry import get_parser
-from src.schemas import ParsePostRequest
+from src.schemas import ParsePostRequest, EvaluateRequest
+from src.services.evaluator import token_level_eval
 import json
 import os
 
@@ -63,7 +64,9 @@ def parse_get(url: str):
 
 @app.post("/parse")
 def parse_post(body: ParsePostRequest):
-    parser, domain = get_parser(body.url)
+    url = str(body.url)
+
+    parser, domain = get_parser(url)
 
     if parser is None:
         raise HTTPException(
@@ -72,7 +75,7 @@ def parse_post(body: ParsePostRequest):
         )
 
     try:
-        result = parser(body.url, htmltext=body.htmltext)
+        result = parser(url, htmltext=body.htmltext)
     except TypeError:
         raise HTTPException(
             status_code=500,
@@ -102,4 +105,16 @@ def parse_post(body: ParsePostRequest):
         "title": result.get("title"),
         "htmltext": result.get("htmltext"),
         "parsedtext": result.get("parsedtext"),
+    }
+
+@app.post("/evaluate")
+def evaluate(body: EvaluateRequest):
+    scores = token_level_eval(body.parsedtext, body.goldtext)
+
+    return {
+        "tokenleveleval": {
+            "precision": scores["precision"],
+            "recall": scores["recall"],
+            "f1": scores["f1"]
+        }
     }
