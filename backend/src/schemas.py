@@ -1,26 +1,26 @@
 from pydantic import BaseModel, HttpUrl
-from typing import List, Optional
+from typing import List
 
 
 class ParsePostRequest(BaseModel):
     url: HttpUrl
-    htmltext: str
+    html_text: str
 
 
 class ParseResponse(BaseModel):
     url: HttpUrl
     domain: str
     title: str
-    htmltext: str
-    parsedtext: str
+    html_text: str
+    parsed_text: str
 
 
 class GoldStandardEntry(BaseModel):
     url: HttpUrl
     domain: str
     title: str
-    htmltext: str
-    goldtext: str
+    html_text: str
+    gold_text: str
 
 
 class DomainsResponse(BaseModel):
@@ -28,12 +28,12 @@ class DomainsResponse(BaseModel):
 
 
 class FullGoldStandardResponse(BaseModel):
-    goldstandard: List[GoldStandardEntry]
+    gold_standard: List[GoldStandardEntry]
 
 
 class EvaluateRequest(BaseModel):
-    parsedtext: str
-    goldtext: str
+    parsed_text: str
+    gold_text: str
 
 
 class TokenLevelEval(BaseModel):
@@ -43,19 +43,8 @@ class TokenLevelEval(BaseModel):
 
 
 class EvaluateResponse(BaseModel):
-    tokenleveleval: TokenLevelEval
-
-
-class FullGSEvalEntry(BaseModel):
-    url: HttpUrl
-    precision: float
-    recall: float
-    f1: float
+    token_level_eval: TokenLevelEval
 
 
 class FullGSEvalResponse(BaseModel):
-    domain: str
-    results: List[FullGSEvalEntry]
-    average_precision: float
-    average_recall: float
-    average_f1: float
+    token_level_eval: TokenLevelEval

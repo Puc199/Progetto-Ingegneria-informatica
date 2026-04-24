@@ -1,9 +1,10 @@
 from urllib.parse import urlparse
 from src.parsers.wikipedia_parser import parse_wikipedia
+from src.parsers.basketball_reference_parser import parse_basketball_reference
 
 PARSERS = {
     "wikipedia.org": parse_wikipedia,
-    # "basketball-reference.com": parse_basketball_reference,
+    "basketball-reference.com": parse_basketball_reference,
     # "global.morningstar.com": parse_morningstar,
     # "it.tradingview.com": parse_tradingview,
 }
