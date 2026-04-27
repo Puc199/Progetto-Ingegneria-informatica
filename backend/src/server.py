@@ -7,7 +7,7 @@ import os
 
 app = FastAPI(title="Pipeline di Parsing Web")
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DOMAINS_FILE = os.path.join(BASE_DIR, "domains.json")
 GSDATA_DIR = os.path.join(BASE_DIR, "gsdata")
 
