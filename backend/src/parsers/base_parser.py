@@ -86,6 +86,9 @@ def extract_page_title(soup: BeautifulSoup) -> str:
 
 
 def build_result(url: str, domain: str, title: str, html_text: str, parsed_text: str) -> dict:
+
+    print("BUILD parsed_text preview:", parsed_text[:1200])
+    print("BUILD html_text preview:", html_text[:500])
     return {
         "url": url,
         "domain": domain,
