@@ -1,5 +1,7 @@
+import asyncio
 import requests
 from bs4 import BeautifulSoup
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 
 def fetch_html(url: str) -> str:
@@ -18,6 +20,59 @@ def fetch_html(url: str) -> str:
     response = requests.get(url, headers=headers, timeout=20)
     response.raise_for_status()
     return response.text
+
+
+async def _crawl4ai_fetch(url: str) -> str:
+    browser_cfg = BrowserConfig(
+        browser_type="chromium",
+        headless=True,
+        verbose=False
+    )
+    run_cfg = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS
+    )
+
+    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+        result = await crawler.arun(url=url, config=run_cfg)
+
+    if not result.success:
+        raise Exception(result.error_message or f"Errore Crawl4AI su {url}")
+
+    return result.html or result.cleaned_html or ""
+
+
+def fetch_html_crawl4ai(url: str) -> str:
+    try:
+        html = asyncio.run(_crawl4ai_fetch(url))
+        if html and html.strip():
+            return html
+    except Exception:
+        pass
+
+    return fetch_html(url)
+
+
+async def _crawl4ai_parse_raw_html(html_text: str) -> str:
+    browser_cfg = BrowserConfig(
+        browser_type="chromium",
+        headless=True,
+        verbose=False
+    )
+    run_cfg = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS
+    )
+
+    async with AsyncWebCrawler(config=browser_cfg) as crawler:
+        result = await crawler.arun(url=f"raw:{html_text}", config=run_cfg)
+
+    if not result.success:
+        raise Exception(result.error_message or "Errore Crawl4AI su HTML diretto")
+
+    return result.html or result.cleaned_html or html_text
+
+
+def parse_raw_html_with_crawl4ai(html_text: str) -> str:
+    return asyncio.run(_crawl4ai_parse_raw_html(html_text))
 
 
 def make_soup(html: str) -> BeautifulSoup:
