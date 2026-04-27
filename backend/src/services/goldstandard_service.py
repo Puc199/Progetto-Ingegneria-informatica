@@ -6,7 +6,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.pa
 GSDATA_DIR = os.path.join(BASE_DIR, "gsdata")
 
 DOMAIN_TO_FILE = {
-    "wikipedia.org": "wikipedia_gs.json",
+    "en.wikipedia.org": "wikipedia_gs.json",
     "global.morningstar.com": "morningstar_gs.json",
     "www.basketball-reference.com": "basketballreference_gs.json",
     "it.tradingview.com": "tradingview_gs.json",

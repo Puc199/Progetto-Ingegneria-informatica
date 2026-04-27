@@ -262,7 +262,7 @@ def parse_wikipedia(url: str, htmltext: str | None = None) -> dict:
         content_root = soup.select_one(".mw-parser-output")
 
     if content_root is None:
-        return build_result(url, "wikipedia.org", title, html, "")
+        return build_result(url, "en.wikipedia.org", title, html, "")
 
     for selector in REMOVE_SELECTORS:
         for tag in content_root.select(selector):
@@ -274,4 +274,4 @@ def parse_wikipedia(url: str, htmltext: str | None = None) -> dict:
     parse_section_children(parser_output, blocks)
     parsedtext = clean_output("\n\n".join(blocks).strip())
 
-    return build_result(url, "wikipedia.org", title, html, parsedtext)
+    return build_result(url, "en.wikipedia.org", title, html, parsedtext)

@@ -7,8 +7,14 @@ def remove_markdown(text: str) -> str:
     if not text:
         return ""
 
-    html = mistune.markdown(text)
+    html = mistune.html(text)
     soup = BeautifulSoup(html, "html.parser")
-    plain = soup.get_text(separator=" ", strip=True)
-    plain = re.sub(r"\s+", " ", plain).strip()
-    return plain
+
+    for tag in soup.find_all(True):
+        tag.unwrap()
+
+    plain = str(soup)
+    plain = re.sub(r"[ \t]+", " ", plain)
+    plain = re.sub(r"\n+", "\n", plain)
+
+    return plain.strip()

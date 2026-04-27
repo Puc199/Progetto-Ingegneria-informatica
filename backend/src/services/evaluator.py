@@ -1,12 +1,11 @@
-from collections import Counter
 from src.services.markdown_utils import remove_markdown
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> set[str]:
     cleaned = remove_markdown(text).lower().strip()
     if not cleaned:
-        return []
-    return cleaned.split()
+        return set()
+    return set(cleaned.split())
 
 
 def token_level_eval(parsedtext: str, goldtext: str) -> dict:
@@ -20,10 +19,7 @@ def token_level_eval(parsedtext: str, goldtext: str) -> dict:
             "f1": 0.0
         }
 
-    pred_counter = Counter(pred_tokens)
-    gold_counter = Counter(gold_tokens)
-
-    overlap = sum((pred_counter & gold_counter).values())
+    overlap = len(pred_tokens & gold_tokens)
 
     precision = overlap / len(pred_tokens) if pred_tokens else 0.0
     recall = overlap / len(gold_tokens) if gold_tokens else 0.0
