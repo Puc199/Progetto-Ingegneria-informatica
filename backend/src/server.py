@@ -10,18 +10,39 @@ from src.services.evaluator import token_level_eval
 
 app = FastAPI(title="Pipeline di Parsing Web")
 
-BASE_DIR = Path(__file__).resolve().parents[2]
+
+BASE_DIR = Path(__file__).resolve().parents[1]
 DOMAINS_FILE = BASE_DIR / "domains.json"
 GSDATA_DIR = BASE_DIR / "gsdata"
+
+
+def normalize_domain(domain: str) -> str:
+    if not domain:
+        return ""
+    domain = domain.strip().lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return domain
 
 
 def load_domains() -> list[str]:
     try:
         with DOMAINS_FILE.open("r", encoding="utf-8") as f:
             domains = json.load(f)
+
         if not isinstance(domains, list):
             raise HTTPException(status_code=500, detail="domains.json deve contenere una lista.")
-        return domains
+
+        cleaned_domains = []
+        for domain in domains:
+            if not isinstance(domain, str):
+                continue
+            domain = domain.strip()
+            if domain:
+                cleaned_domains.append(domain)
+
+        return cleaned_domains
+
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail="File domains.json non trovato.")
     except json.JSONDecodeError:
@@ -49,9 +70,7 @@ def normalize_gs_entry(entry: dict) -> dict:
 
 
 def domain_to_gs_filename(domain: str) -> str:
-    base = domain.lower()
-    if base.startswith("www."):
-        base = base[4:]
+    base = normalize_domain(domain)
     for suffix in [".com", ".org", ".it", ".net", ".edu"]:
         if base.endswith(suffix):
             base = base[: -len(suffix)]
@@ -62,7 +81,9 @@ def domain_to_gs_filename(domain: str) -> str:
 
 
 def get_gs_file_path(domain: str) -> Path:
-    candidate = GSDATA_DIR / domain_to_gs_filename(domain)
+    normalized_domain = normalize_domain(domain)
+
+    candidate = GSDATA_DIR / domain_to_gs_filename(normalized_domain)
     if candidate.exists():
         return candidate
 
@@ -73,9 +94,10 @@ def get_gs_file_path(domain: str) -> Path:
         try:
             with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
+
             if isinstance(data, list) and data:
-                first_domain = data[0].get("domain")
-                if first_domain == domain:
+                first_domain = normalize_domain(data[0].get("domain"))
+                if first_domain == normalized_domain:
                     return path
         except Exception:
             continue
@@ -84,11 +106,13 @@ def get_gs_file_path(domain: str) -> Path:
 
 
 def load_gold_standard_for_domain(domain: str) -> list[dict]:
-    supported_domains = load_domains()
-    if domain not in supported_domains:
+    normalized_domain = normalize_domain(domain)
+    supported_domains = [normalize_domain(d) for d in load_domains()]
+
+    if normalized_domain not in supported_domains:
         raise HTTPException(status_code=400, detail=f"Dominio non supportato: {domain}")
 
-    gs_file = get_gs_file_path(domain)
+    gs_file = get_gs_file_path(normalized_domain)
 
     try:
         with gs_file.open("r", encoding="utf-8") as f:
