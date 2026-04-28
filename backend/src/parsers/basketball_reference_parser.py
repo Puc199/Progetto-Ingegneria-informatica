@@ -1,5 +1,10 @@
+from __future__ import annotations
+
 import re
+from typing import Optional
+
 from bs4 import BeautifulSoup, Comment
+
 from src.parsers.base_parser import (
     fetch_html_crawl4ai,
     make_soup,
@@ -8,160 +13,297 @@ from src.parsers.base_parser import (
 )
 
 
-def _clean_text(text: str) -> str:
-    text = text.replace("▪", " ")
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"\[[^\]]+\]", "", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def _normalize_text(text: str) -> str:
+    return re.sub(r"\s+", " ", text or "").strip()
 
 
-def _uncomment_html_tables(soup: BeautifulSoup) -> BeautifulSoup:
-    comments = soup.find_all(string=lambda t: isinstance(t, Comment))
-    for comment in comments:
-        raw = str(comment)
-        if "<table" in raw or 'id="all_' in raw or "id='all_" in raw:
-            try:
-                parsed = BeautifulSoup(raw, "html.parser")
-                comment.replace_with(parsed)
-            except Exception:
-                continue
-    return soup
+def _dedupe_blocks(blocks: list[str]) -> list[str]:
+    out = []
+    seen = set()
+    for block in blocks:
+        norm = _normalize_text(block)
+        if not norm:
+            continue
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(block.strip())
+    return out
+
+
+def _dedupe_lines(text: str) -> str:
+    lines = [line.strip() for line in (text or "").splitlines()]
+    out = []
+    seen = set()
+    for line in lines:
+        norm = _normalize_text(line)
+        if not norm:
+            continue
+        key = norm.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(norm)
+    return "\n".join(out).strip()
 
 
 def _remove_noise(soup: BeautifulSoup) -> BeautifulSoup:
-    for tag in soup.find_all(["script", "style", "svg", "noscript"]):
+    for tag in soup.find_all(["script", "style", "noscript", "svg", "template"]):
         tag.decompose()
+
+    selectors = [
+        "nav",
+        "header",
+        "footer",
+        "aside",
+        "#header",
+        "#footer",
+        "#nav",
+        "#srcom",
+        "#site_menu",
+        "#footer_wrapper",
+        ".footer",
+        ".nav",
+        ".breadcrumbs",
+        ".ad-placeholder",
+        ".advertisement",
+        ".overlay",
+        ".popup",
+        ".cookie",
+        ".cookies",
+        ".sr_ad",
+        ".promo",
+    ]
+    for selector in selectors:
+        for tag in soup.select(selector):
+            tag.decompose()
+
+    for comment in soup.find_all(string=lambda x: isinstance(x, Comment)):
+        comment.extract()
+
     return soup
 
 
-def _extract_table_lines(table, max_rows: int = 8) -> list[str]:
-    lines = []
+def _guess_title(soup: BeautifulSoup) -> Optional[str]:
+    h1 = soup.find("h1")
+    if h1:
+        txt = _normalize_text(h1.get_text(" ", strip=True))
+        if txt:
+            return txt
 
+    title = soup.find("title")
+    if title:
+        txt = _normalize_text(title.get_text(" ", strip=True))
+        if txt:
+            return txt
+
+    og = soup.select_one('meta[property="og:title"]')
+    if og and og.get("content"):
+        txt = _normalize_text(og.get("content", ""))
+        if txt:
+            return txt
+
+    extracted = extract_page_title(soup)
+    if extracted:
+        extracted = _normalize_text(extracted)
+        if extracted:
+            return extracted
+
+    return None
+
+
+def _detect_branch(url: str, html: str) -> str:
+    u = (url or "").lower()
+    h = (html or "").lower()
+    if "/playoffs/" in u or "playoffs series" in h or "series table" in h:
+        return "playoff"
+    if "/teams/" in u or "roster and stats" in h or "schedule and results" in h:
+        return "team"
+    if "/executives/" in u or "franchises" in h or "team records table" in h:
+        return "executive"
+    if "/players/" in u or "per game table" in h or "advanced table" in h:
+        return "player"
+    return "player"
+
+
+def _table_caption(table) -> str:
     caption = table.find("caption")
+    return _normalize_text(caption.get_text(" ", strip=True)) if caption else ""
+
+
+def _table_to_text(table) -> str:
+    parts = []
+    caption = _table_caption(table)
     if caption:
-        cap = _clean_text(caption.get_text(" ", strip=True))
-        if cap:
-            lines.append(f"### {cap}")
-
-    rows = table.find_all("tr")
-    for row in rows[:max_rows]:
+        parts.append(caption)
+    for row in table.find_all("tr"):
         cells = row.find_all(["th", "td"])
-        texts = []
-        for cell in cells:
-            text = _clean_text(cell.get_text(" ", strip=True))
+        row_text = [_normalize_text(cell.get_text(" ", strip=True)) for cell in cells]
+        row_text = [x for x in row_text if x]
+        if row_text:
+            parts.append(" | ".join(row_text))
+    return "\n".join(parts).strip()
+
+
+def _extract_tables_from_visible_html(soup: BeautifulSoup) -> str:
+    blocks = []
+    for table in soup.find_all("table"):
+        txt = _table_to_text(table)
+        if txt:
+            blocks.append(txt)
+    return "\n\n".join(_dedupe_blocks(blocks)).strip()
+
+
+def _extract_tables_from_comments(html: str) -> str:
+    blocks = []
+    outer = BeautifulSoup(html, "html.parser")
+    for comment in outer.find_all(string=lambda x: isinstance(x, Comment)):
+        comment_text = str(comment)
+        if "<table" not in comment_text.lower():
+            continue
+        try:
+            csoup = BeautifulSoup(comment_text, "html.parser")
+        except Exception:
+            continue
+        for table in csoup.find_all("table"):
+            txt = _table_to_text(table)
+            if txt:
+                blocks.append(txt)
+    return "\n\n".join(_dedupe_blocks(blocks)).strip()
+
+
+def _extract_text_from_node(node) -> str:
+    if not node:
+        return ""
+    clone = BeautifulSoup(str(node), "html.parser")
+    for bad in clone.select("script, style, noscript, table, svg, template"):
+        bad.decompose()
+    return _dedupe_lines(clone.get_text("\n", strip=True))
+
+
+def _extract_body_text(soup: BeautifulSoup) -> str:
+    body = soup.body
+    if not body:
+        return ""
+    clone = BeautifulSoup(str(body), "html.parser")
+    for bad in clone.select("script, style, noscript, nav, header, footer, aside, table, svg, template"):
+        bad.decompose()
+    return _dedupe_lines(clone.get_text("\n", strip=True))
+
+
+def _extract_important_sections(soup: BeautifulSoup) -> str:
+    parts = []
+    seen = set()
+    selectors = [
+        "#meta",
+        "#info",
+        "#content",
+        "#all_content",
+        "main",
+        "#div_per_game",
+        "#div_totals",
+        "#div_advanced",
+        "#div_playoffs",
+        "#div_roster",
+        "#div_team_and_opponent",
+        "#div_schedule",
+        "#div_standings",
+        "#div_team_records",
+        "#div_franchises",
+    ]
+    for selector in selectors:
+        for node in soup.select(selector):
+            text = _extract_text_from_node(node)
             if text:
-                texts.append(text)
-        if texts:
-            lines.append(" | ".join(texts))
-
-    return lines
-
-
-def _find_main_table(section):
-    tables = section.find_all("table")
-    if not tables:
-        return None
-
-    best = None
-    best_score = -1
-
-    for table in tables:
-        rows = table.find_all("tr")
-        score = len(rows)
-
-        table_id = table.get("id", "")
-        table_class = " ".join(table.get("class", []))
-
-        if table_id:
-            score += 5
-        if "stats" in table_id.lower():
-            score += 5
-        if "stats_table" in table_class.lower():
-            score += 3
-        if table.find("caption"):
-            score += 2
-
-        if score > best_score:
-            best_score = score
-            best = table
-
-    return best
+                key = text.lower()
+                if key not in seen:
+                    seen.add(key)
+                    parts.append(text)
+    return "\n\n".join(parts).strip()
 
 
-def parse_basketball_reference(url: str, html_text: str | None = None) -> dict:
+def parse_basketball_reference(
+    url: str,
+    html_text: Optional[str] = None,
+    htmltext: Optional[str] = None,
+    html: Optional[str] = None,
+    raw_html: Optional[str] = None,
+    content: Optional[str] = None,
+    **kwargs,
+):
+    resolved_html = (
+        html_text
+        or htmltext
+        or html
+        or raw_html
+        or content
+        or kwargs.get("html_text")
+        or kwargs.get("htmltext")
+        or kwargs.get("html")
+        or kwargs.get("raw_html")
+        or kwargs.get("content")
+    )
+
+    if not resolved_html or resolved_html == "string":
+        try:
+            resolved_html = fetch_html_crawl4ai(url)
+        except Exception:
+            resolved_html = None
+
     domain = "basketball-reference.com"
 
-    if not html_text or html_text == "string":
-        html_text = fetch_html_crawl4ai(url)
+    if not resolved_html:
+        result = build_result(url, domain, None, None, "")
+        result["branch"] = "player"
+        return result
 
-    soup = make_soup(html_text)
+    soup = make_soup(resolved_html)
     soup = _remove_noise(soup)
-    soup = _uncomment_html_tables(soup)
-    soup = _remove_noise(soup)
 
-    info = soup.find("div", id="info")
-
-    title = ""
-    if info:
-        h1 = info.find("h1")
-        if h1:
-            title = _clean_text(h1.get_text(" ", strip=True))
-    if not title:
-        title = extract_page_title(soup)
+    branch = _detect_branch(url, resolved_html)
+    title = _guess_title(soup)
 
     parts = []
 
     if title:
-        parts.append(f"# {title}")
+        parts.append(title)
 
-    if info:
-        meta = info.find("div", id="meta") or info
-        for p in meta.find_all("p", recursive=False):
-            text = _clean_text(p.get_text(" ", strip=True))
-            if text:
-                parts.append(text)
+    meta_text = _extract_text_from_node(soup.select_one("#meta"))
+    if meta_text:
+        parts.append(meta_text)
 
-    wanted_sections = [
-        ("all_per_game", "Per Game"),
-        ("all_totals", "Totals"),
-        ("all_advanced", "Advanced"),
-        ("all_adj_shooting", "Adjusted Shooting"),
-        ("all_playoffs_series", "Playoffs Series"),
-        ("all_faq", "Frequently Asked Questions"),
-    ]
+    info_text = _extract_text_from_node(soup.select_one("#info"))
+    if info_text:
+        parts.append(info_text)
 
-    for section_id, fallback_heading in wanted_sections:
-        section = soup.find("div", id=section_id)
-        if not section:
-            continue
+    important_sections = _extract_important_sections(soup)
+    if important_sections:
+        parts.append(important_sections)
 
-        heading = section.find(["h2", "h3"])
-        heading_text = fallback_heading
-        if heading:
-            maybe = _clean_text(heading.get_text(" ", strip=True))
-            if maybe:
-                heading_text = maybe
+    content_text = _extract_text_from_node(soup.select_one("#content"))
+    if content_text:
+        parts.append(content_text)
 
-        parts.append(f"## {heading_text}")
+    visible_tables = _extract_tables_from_visible_html(soup)
+    if visible_tables:
+        parts.append(visible_tables)
 
-        if section_id == "all_faq":
-            faq_texts = []
-            for node in section.find_all(["h3", "p"], limit=20):
-                text = _clean_text(node.get_text(" ", strip=True))
-                if text and text not in faq_texts:
-                    faq_texts.append(text)
-            parts.extend(faq_texts)
-            continue
+    comment_tables = _extract_tables_from_comments(resolved_html)
+    if comment_tables:
+        parts.append(comment_tables)
 
-        table = _find_main_table(section)
-        if table:
-            parts.extend(_extract_table_lines(table, max_rows=8))
+    if not parts:
+        body_text = _extract_body_text(soup)
+        if body_text:
+            parts.append(body_text)
 
-    parsed_text = "\n\n".join(x for x in parts if x).strip()
+    parts = _dedupe_blocks(parts)
+    parsed_text = "\n\n".join(parts).strip()
 
+    if not parsed_text:
+        parsed_text = _dedupe_lines(soup.get_text("\n", strip=True))
 
-    print("TITLE:", title)
-    print("PARSED PREVIEW:", parsed_text[:1200])
-    print("PARSED LEN:", len(parsed_text))
-    return build_result(url, domain, title, html_text, parsed_text)
+    result = build_result(url, domain, title, resolved_html, parsed_text)
+    result["branch"] = branch
+    return result

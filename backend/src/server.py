@@ -1,20 +1,23 @@
+from pathlib import Path
+import json
+
 from fastapi import FastAPI, HTTPException
+
 from src.parsers.registry import get_parser
 from src.schemas import ParsePostRequest, EvaluateRequest
 from src.services.evaluator import token_level_eval
-import json
-import os
+
 
 app = FastAPI(title="Pipeline di Parsing Web")
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DOMAINS_FILE = os.path.join(BASE_DIR, "domains.json")
-GSDATA_DIR = os.path.join(BASE_DIR, "gsdata")
+BASE_DIR = Path(__file__).resolve().parents[2]
+DOMAINS_FILE = BASE_DIR / "domains.json"
+GSDATA_DIR = BASE_DIR / "gsdata"
 
 
 def load_domains() -> list[str]:
     try:
-        with open(DOMAINS_FILE, "r", encoding="utf-8") as f:
+        with DOMAINS_FILE.open("r", encoding="utf-8") as f:
             domains = json.load(f)
         if not isinstance(domains, list):
             raise HTTPException(status_code=500, detail="domains.json deve contenere una lista.")
@@ -58,20 +61,17 @@ def domain_to_gs_filename(domain: str) -> str:
     return f"{base}_gs.json"
 
 
-def get_gs_file_path(domain: str) -> str:
-    candidate = os.path.join(GSDATA_DIR, domain_to_gs_filename(domain))
-    if os.path.exists(candidate):
+def get_gs_file_path(domain: str) -> Path:
+    candidate = GSDATA_DIR / domain_to_gs_filename(domain)
+    if candidate.exists():
         return candidate
 
-    if not os.path.isdir(GSDATA_DIR):
+    if not GSDATA_DIR.is_dir():
         return candidate
 
-    for filename in os.listdir(GSDATA_DIR):
-        if not filename.endswith(".json"):
-            continue
-        path = os.path.join(GSDATA_DIR, filename)
+    for path in GSDATA_DIR.glob("*.json"):
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with path.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list) and data:
                 first_domain = data[0].get("domain")
@@ -91,7 +91,7 @@ def load_gold_standard_for_domain(domain: str) -> list[dict]:
     gs_file = get_gs_file_path(domain)
 
     try:
-        with open(gs_file, "r", encoding="utf-8") as f:
+        with gs_file.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         raise HTTPException(status_code=500, detail=f"File GS non trovato per il dominio: {domain}")
@@ -186,7 +186,7 @@ def evaluate(body: EvaluateRequest):
         "token_level_eval": {
             "precision": scores["precision"],
             "recall": scores["recall"],
-            "f1": scores["f1"]
+            "f1": scores["f1"],
         }
     }
 
@@ -255,6 +255,6 @@ def full_gs_eval(domain: str):
         "token_level_eval": {
             "precision": sum(precisions) / len(precisions),
             "recall": sum(recalls) / len(recalls),
-            "f1": sum(f1s) / len(f1s)
+            "f1": sum(f1s) / len(f1s),
         }
     }
