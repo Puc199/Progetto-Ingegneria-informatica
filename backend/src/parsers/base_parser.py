@@ -78,6 +78,13 @@ def fetch_html(url: str) -> str:
     }
     response = requests.get(url, headers=headers, timeout=20)
     response.raise_for_status()
+
+    # requests ripiega su ISO-8859-1 quando il server non dichiara il charset:
+    # su Basketball-Reference questo sfascia la sezione Translations
+    # (cirillico, greco, ebraico, CJK) trasformandola in mojibake.
+    if "charset" not in response.headers.get("Content-Type", "").lower():
+        response.encoding = response.apparent_encoding or "utf-8"
+
     return response.text
 
 

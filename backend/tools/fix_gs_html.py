@@ -36,7 +36,7 @@ sys.path.insert(0, str(BASE_DIR))
 
 from bs4 import BeautifulSoup                                    # noqa: E402
 
-from src.parsers.base_parser import fetch_html_crawl4ai          # noqa: E402
+from src.parsers.base_parser import fetch_html, fetch_html_crawl4ai   # noqa: E402
 from src.parsers.registry import get_parser                      # noqa: E402
 
 
@@ -98,11 +98,12 @@ def save(path: Path, container, entries) -> None:
     print(f"\nScritto {path}\nBackup in {backup}")
 
 
-def refresh(entry: dict) -> bool:
+def refresh(entry: dict, plain: bool = False) -> bool:
     url = entry.get("url") or ""
-    print(f"  scarico {url} ...")
+    modo = "HTTP semplice" if plain else "Crawl4AI (browser)"
+    print(f"  scarico {url}  [{modo}] ...")
     try:
-        html = fetch_html_crawl4ai(url)
+        html = fetch_html(url) if plain else fetch_html_crawl4ai(url)
     except Exception as exc:
         print(f"  ERRORE nel download: {exc}")
         return False
@@ -130,6 +131,10 @@ def main() -> None:
     ap.add_argument("--all-broken", action="store_true")
     ap.add_argument("--check", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--plain", action="store_true",
+                    help="scarica con HTTP semplice invece che con Crawl4AI: "
+                         "produce l'HTML servito dal server, senza JS, "
+                         "coerente con il resto del Gold Standard")
     args = ap.parse_args()
 
     path = Path(args.gs) if args.gs else resolve_gs()
@@ -167,7 +172,7 @@ def main() -> None:
             print(f"  (dry-run) {entry.get('url')}")
         return
 
-    changed = sum(1 for entry in targets if refresh(entry))
+    changed = sum(1 for entry in targets if refresh(entry, plain=args.plain))
     if changed:
         save(path, container, entries)
     else:

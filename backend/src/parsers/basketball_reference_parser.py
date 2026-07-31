@@ -64,6 +64,12 @@ DEFAULT_INCLUDE_TABLES = False
 # Se il selettore non trova nulla nella pagina, si ricade su tutte le tabelle.
 TABLE_SCOPE_BY_BRANCH = {
     "playoffs": [".game_summary", ".game_summaries"],
+    # sulle pagine squadra il GS contiene il riquadro riepilogativo, il roster,
+    # l'injury report e lo staff tecnico: non le tabelle statistiche
+    # (Salaries / Per Game / Advanced / Shooting).
+    # I selettori con [id*=...] reggono le variazioni di nome fra le stagioni.
+    "teams": ["#all_roster", "#div_roster",
+              "[id*='injur']", "[id*='coach']"],
 }
 
 INCLUDE_TABLES = None      # None = decidi in base al branch; True/False = forza
@@ -100,6 +106,7 @@ NOISE_SELECTORS = [
     # UI delle tabelle (Share & Export, Glossary, filtri stagione, tooltip)
     ".section_heading_text", "[id^=tfooter_]", ".table_outer_container .footer",
     ".filter", ".hoversmooth", ".tooltip", "#tooltip", ".hidden_hover",
+    ".f-i",                     # iconcine bandiera: producono testo "us", "vi", "br"
     ".shareon", ".share", ".sr-copy", ".prevnext", ".media-item",
     # blocchi "More ... Pages" e link correlati
     "#all_button_menu", ".button2", ".sr_preset",
@@ -233,6 +240,15 @@ def _uncomment_hidden_content(soup: BeautifulSoup, passes: int = 2) -> int:
         if expanded == 0:
             break
     return total
+
+
+def _strip_minimal(soup: BeautifulSoup) -> BeautifulSoup:
+    """Pulizia conservativa: solo tag tecnici. Usata come paracadute."""
+    for tag in soup.find_all(["script", "style", "noscript", "svg", "template", "iframe", "form"]):
+        tag.decompose()
+    for comment in soup.find_all(string=lambda s: isinstance(s, Comment)):
+        comment.extract()
+    return soup
 
 
 def _strip_noise(soup: BeautifulSoup) -> BeautifulSoup:
@@ -375,11 +391,8 @@ def _render_table(table: Tag) -> str:
         row = row + [""] * (width - len(row))
         out.append("| " + " | ".join(row) + " |")
 
-    caption = table.find("caption")
-    if caption:
-        cap = _clean_line(caption.get_text(" ", strip=True))
-        if _keep_line(cap):
-            out.insert(0, f"**{cap}**")
+    # la <caption> di Basketball-Reference e' testo dell'interfaccia
+    # ("Roster Table", "Per Game Table"), non contenuto della pagina
     return "\n".join(out)
 
 
@@ -505,6 +518,33 @@ def _finalize(blocks: list[str]) -> str:
 # 4. Entry point
 # --------------------------------------------------------------------------- #
 
+def _collect(soup: BeautifulSoup, branch: str, include_tables: bool,
+             aggressive: bool) -> list[str]:
+    """Estrae meta + sezioni. aggressive=False applica solo la pulizia minima."""
+    _strip_noise(soup) if aggressive else _strip_minimal(soup)
+
+    content_root = soup.select_one("#content") or soup.body or soup
+
+    blocks: list[str] = []
+    meta = content_root.select_one("#meta") or soup.select_one("#meta")
+    if meta:
+        meta_lines = _render_meta(meta)
+        if meta_lines:
+            blocks.append("\n".join(meta_lines))
+        meta.decompose()          # evita che venga riletto come sezione
+
+    allowed = _allowed_tables(content_root, branch) if include_tables else None
+
+    sections: list[str] = []
+    for wrapper in _iter_sections(content_root):
+        sections.extend(_render_wrapper(wrapper, include_tables, allowed))
+    if not sections:
+        sections = _fallback_blocks(content_root, include_tables)
+
+    blocks.extend(sections)
+    return blocks
+
+
 def parse_basketball_reference(
     url: str,
     html_text: Optional[str] = None,
@@ -549,35 +589,25 @@ def parse_basketball_reference(
     # 3) pulizia
     _strip_noise(soup)
 
-    content_root = soup.select_one("#content") or soup.body or soup
+    branch = _branch(url, resolved)
+    include_tables = _tables_enabled(branch)
+
+    body = _collect(soup, branch, include_tables, aggressive=True)
+
+    # Paracadute: se la pulizia aggressiva ha svuotato la pagina (selettori di
+    # rumore troppo larghi su una variante di markup), si riparte da capo con
+    # una pulizia minima. Meglio un po' di rumore che una pagina vuota.
+    if not body:
+        retry = make_soup(resolved)
+        _uncomment_hidden_content(retry)
+        body = _collect(retry, branch, include_tables, aggressive=False)
 
     blocks: list[str] = []
     if title:
         blocks.append(f"# {title}")
-
-    meta = content_root.select_one("#meta") or soup.select_one("#meta")
-    if meta:
-        meta_lines = _render_meta(meta)
-        if meta_lines:
-            blocks.append("\n".join(meta_lines))   # lista Markdown unica
-        meta.decompose()          # evita che venga riletto come sezione
-
     if bling_lines:
         blocks.append("\n".join(bling_lines))
-
-    branch = _branch(url, resolved)
-    include_tables = _tables_enabled(branch)
-
-    allowed = _allowed_tables(content_root, branch) if include_tables else None
-
-    section_blocks: list[str] = []
-    for wrapper in _iter_sections(content_root):
-        section_blocks.extend(_render_wrapper(wrapper, include_tables, allowed))
-
-    if not section_blocks:
-        section_blocks = _fallback_blocks(content_root, include_tables)
-
-    blocks.extend(section_blocks)
+    blocks.extend(body)
 
     parsed_text = _finalize(blocks)
 
