@@ -41,9 +41,40 @@ from src.parsers.base_parser import fetch_html_crawl4ai, make_soup, build_result
 # Configurazione (usata da tools/tune_br.py per la messa a punto sul GS)
 # --------------------------------------------------------------------------- #
 
-INCLUDE_TABLES = True      # includere le tabelle statistiche come tabelle Markdown
+# Le tabelle vanno incluse o no a seconda del tipo di pagina, perche' il GS di
+# questo progetto le esclude sulle schede giocatore ma le include altrove
+# (tabellone dei playoff, roster di squadra, ...).
+TABLES_BY_BRANCH = {
+    "players": False,
+    "playoffs": True,
+    "teams": True,
+    "executives": True,
+    "coaches": True,
+    "leagues": True,
+    "awards": True,
+    "draft": True,
+    "boxscores": True,
+    "generic": False,
+}
+DEFAULT_INCLUDE_TABLES = False
+
+# Su alcune pagine solo una parte delle tabelle e' contenuto informativo.
+# Sulle pagine di serie playoff il GS contiene i riepiloghi partita
+# (div.game_summary) ma non le tabelle Advanced Stats / Four Factors.
+# Se il selettore non trova nulla nella pagina, si ricade su tutte le tabelle.
+TABLE_SCOPE_BY_BRANCH = {
+    "playoffs": [".game_summary", ".game_summaries"],
+}
+
+INCLUDE_TABLES = None      # None = decidi in base al branch; True/False = forza
 MAX_TABLE_ROWS = 0         # 0 = nessun limite sul numero di righe per tabella
 INCLUDE_TABLE_HEADERS = True
+
+
+def _tables_enabled(branch: str) -> bool:
+    if INCLUDE_TABLES is not None:
+        return bool(INCLUDE_TABLES)
+    return TABLES_BY_BRANCH.get(branch, DEFAULT_INCLUDE_TABLES)
 
 
 # --------------------------------------------------------------------------- #
@@ -76,7 +107,16 @@ NOISE_SELECTORS = [
 
 # Wrapper (div[id^="all_"]) da saltare del tutto: id che matchano questi pattern
 SKIP_WRAPPER_ID = re.compile(
-    r"(leaderboard|advert|_ad$|sponsor|footer|social|nav|button|marketing)",
+    r"(leaderboard|advert|_ad$|sponsor|footer|social|nav|button|marketing"
+    r"|news|nba_stats|stats_nba|linescore)",
+    re.IGNORECASE,
+)
+
+# Sezioni da saltare in base al TITOLO: sono blocchi di link o feed di notizie,
+# non contenuto della pagina. Piu' affidabile degli id, che cambiano spesso.
+SKIP_SECTION_HEADING = re.compile(
+    r"^(player news|view on stats\.nba\.com|in the news|more \S.* pages"
+    r"|other resources|frivolities|sponsor|welcome)",
     re.IGNORECASE,
 )
 
@@ -108,6 +148,8 @@ NOISE_LINE_PATTERNS = [
     r"^modify, export",
     r"^switch to\b",
     r"^more .* pages$",
+    r"^upgraded$",
+    r"^player front$",
     r"^you are here",
     r"^in the news",
     r"^all-time greats",
@@ -117,6 +159,12 @@ NOISE_LINE_PATTERNS = [
     r"^\W*$",
 ]
 NOISE_LINE_RE = re.compile("|".join(NOISE_LINE_PATTERNS), re.IGNORECASE)
+
+# Un commento HTML viene espanso se contiene markup di contenuto
+MARKUP_RE = re.compile(r"<(table|div|p|ul|ol|dl|tbody|tr|h[1-6])\b", re.IGNORECASE)
+
+# Tag "a blocco" da cui estrarre il testo dentro una sezione
+TEXT_TAGS = ["p", "li", "dt", "dd", "h3", "h4", "h5"]
 
 
 # --------------------------------------------------------------------------- #
@@ -147,7 +195,9 @@ def _keep_line(s: str) -> bool:
 
 
 def _cell_text(cell: Tag) -> str:
-    txt = _n(cell.get_text(" ", strip=True))
+    # separatore vuoto: con " " markup tipo <a>J. Butler</a>-MIA diventerebbe
+    # "J. Butler -MIA" e <strong>F</strong>inal diventerebbe "F inal"
+    txt = _n(cell.get_text(""))
     return txt.replace("|", "\\|")
 
 
@@ -157,9 +207,10 @@ def _cell_text(cell: Tag) -> str:
 
 def _uncomment_hidden_content(soup: BeautifulSoup, passes: int = 2) -> int:
     """
-    Basketball-Reference nasconde quasi tutte le tabelle dentro commenti HTML.
-    Qui i commenti che contengono markup vengono ri-parsati e reinseriti nel DOM.
-    Ritorna il numero di commenti espansi (utile per il debug).
+    Basketball-Reference nasconde nei commenti HTML non solo le tabelle
+    statistiche, ma anche transactions, FAQ, translations e altre sezioni
+    testuali. Qui ogni commento che contiene markup viene ri-parsato e
+    reinserito nel DOM. Ritorna il numero di commenti espansi (debug).
     """
     total = 0
     for _ in range(passes):
@@ -167,7 +218,9 @@ def _uncomment_hidden_content(soup: BeautifulSoup, passes: int = 2) -> int:
         expanded = 0
         for comment in comments:
             raw = str(comment)
-            if "<table" not in raw and "table_container" not in raw:
+            if "<script" in raw.lower() or "[if " in raw.lower():
+                continue
+            if not MARKUP_RE.search(raw):
                 continue
             fragment = BeautifulSoup(raw, "html.parser")
             anchor = comment
@@ -214,11 +267,13 @@ def _extract_title(soup: BeautifulSoup) -> str:
     return ""
 
 
+# Deve coincidere ESATTAMENTE con la voce in domains.json e con il campo
+# "domain" delle entry del Gold Standard.
+CANONICAL_DOMAIN = "www.basketball-reference.com"
+
+
 def _extract_domain(url: str) -> str:
-    host = (urlparse(url or "").hostname or "basketball-reference.com").lower()
-    if host.startswith("www."):
-        host = host[4:]
-    return host
+    return CANONICAL_DOMAIN
 
 
 def _branch(url: str, html: str) -> str:
@@ -235,15 +290,45 @@ def _branch(url: str, html: str) -> str:
 # 3. Rendering Markdown
 # --------------------------------------------------------------------------- #
 
-def _render_meta(meta: Tag) -> list[str]:
-    """#meta contiene la bio del giocatore / la scheda della squadra."""
+def _lines_from(node: Tag, tags: list[str]) -> list[str]:
+    """Testo dei tag a blocco, saltando quello che sta dentro le tabelle."""
     lines: list[str] = []
-    info = meta.select_one("#info") or meta
-    for p in info.find_all("p"):
-        text = _clean_line(p.get_text(" ", strip=True))
+    for el in node.find_all(tags):
+        if el.find_parent("table") is not None:
+            continue
+        if el.find(tags) is not None:        # contenitore: lo gestiscono i figli
+            continue
+        text = _clean_line(el.get_text(" ", strip=True))
         if _keep_line(text):
-            lines.append(f"- {text}")
+            lines.append(text)
     return lines
+
+
+def _fallback_lines(node: Tag) -> list[str]:
+    """Ultima spiaggia: testo grezzo della sezione, tabelle escluse."""
+    clone = BeautifulSoup(str(node), "html.parser")
+    for table in clone.find_all("table"):
+        table.decompose()
+    lines: list[str] = []
+    for raw in clone.get_text("\n", strip=True).split("\n"):
+        text = _clean_line(raw)
+        if _keep_line(text):
+            lines.append(text)
+    return lines
+
+
+def _render_meta(meta: Tag) -> list[str]:
+    """
+    #meta contiene la bio (in <p>) e la bacheca dei premi (<ul id="bling">
+    con dei <li>): servono entrambi, il GS li include tutti e due.
+    Si legge tutto #meta e non solo #info, perche' su alcune pagine il bling
+    sta fuori da #info (la foto e' gia' stata rimossa come rumore).
+    """
+    info = meta
+    lines = _lines_from(info, ["p", "li"])
+    if not lines:
+        lines = _fallback_lines(info)
+    return [f"- {line}" for line in lines]
 
 
 def _table_header(table: Tag) -> list[str]:
@@ -298,30 +383,55 @@ def _render_table(table: Tag) -> str:
     return "\n".join(out)
 
 
-def _render_wrapper(wrapper: Tag) -> list[str]:
+def _allowed_tables(content: Tag, branch: str) -> Optional[set[int]]:
+    """id() delle tabelle ammesse, o None se sono ammesse tutte."""
+    selectors = TABLE_SCOPE_BY_BRANCH.get(branch)
+    if not selectors:
+        return None
+    allowed = {
+        id(table)
+        for selector in selectors
+        for node in content.select(selector)
+        for table in node.find_all("table")
+    }
+    return allowed or None          # nessun match: nessuna restrizione
+
+
+def _render_wrapper(wrapper: Tag, include_tables: bool,
+                    allowed: Optional[set[int]] = None) -> list[str]:
     """Renderizza un blocco div[id^='all_'] (intestazione + testo + tabelle)."""
     blocks: list[str] = []
 
     heading_node = wrapper.select_one(".section_heading h2, .section_heading h3, h2, h3")
+    heading_text = ""
     if heading_node:
-        heading = _clean_line(heading_node.get_text(" ", strip=True))
-        if _keep_line(heading):
-            level = 2 if heading_node.name == "h2" else 3
-            blocks.append(f"{'#' * level} {heading}")
+        candidate = _clean_line(heading_node.get_text(" ", strip=True))
+        if SKIP_SECTION_HEADING.match(candidate):
+            return []
+        if _keep_line(candidate):
+            heading_text = f"{'#' * (2 if heading_node.name == 'h2' else 3)} {candidate}"
 
-    for p in wrapper.find_all(["p", "li"]):
-        if p.find_parent("table") is not None:
+    lines = _lines_from(wrapper, TEXT_TAGS)
+    if not lines and not wrapper.find("table"):
+        lines = _fallback_lines(wrapper)
+    for line in lines:
+        if heading_node is not None and line == _clean_line(heading_node.get_text(" ", strip=True)):
             continue
-        text = _clean_line(p.get_text(" ", strip=True))
-        if _keep_line(text) and len(text) > 3:
-            blocks.append(text if p.name == "p" else f"- {text}")
+        if len(line) > 3:
+            blocks.append(line)
 
-    if INCLUDE_TABLES:
+    if include_tables:
         for table in wrapper.find_all("table"):
+            if allowed is not None and id(table) not in allowed:
+                continue
             rendered = _render_table(table)
             if rendered:
                 blocks.append(rendered)
 
+    # l'intestazione si emette solo se la sezione ha davvero del contenuto:
+    # con INCLUDE_TABLES=False evita decine di "## Per Game" a vuoto
+    if heading_text and blocks:
+        blocks.insert(0, heading_text)
     return blocks
 
 
@@ -342,12 +452,12 @@ def _iter_sections(content: Tag) -> Iterable[Tag]:
         yield wrapper
 
 
-def _fallback_blocks(content: Tag) -> list[str]:
+def _fallback_blocks(content: Tag, include_tables: bool) -> list[str]:
     """Usato solo se la struttura standard non viene riconosciuta."""
     blocks: list[str] = []
     for node in content.find_all(["h2", "h3", "p", "table"]):
         if node.name == "table":
-            if INCLUDE_TABLES:
+            if include_tables:
                 rendered = _render_table(node)
                 if rendered:
                     blocks.append(rendered)
@@ -424,8 +534,17 @@ def parse_basketball_reference(
     # 1) contenuto nascosto nei commenti -> DOM  (il fix decisivo)
     uncommented = _uncomment_hidden_content(soup)
 
-    # 2) titolo prima di rimuovere il rumore
+    # 2) titolo e bacheca dei premi PRIMA di rimuovere il rumore
     title = _extract_title(soup)
+
+    # <ul id="bling">: su alcune pagine sta fuori da #meta, va preso a parte
+    bling_lines: list[str] = []
+    bling = soup.select_one("#bling")
+    if bling:
+        for item in bling.find_all("li"):
+            text = _clean_line(item.get_text(" ", strip=True))
+            if _keep_line(text):
+                bling_lines.append(f"- {text}")
 
     # 3) pulizia
     _strip_noise(soup)
@@ -436,25 +555,33 @@ def parse_basketball_reference(
     if title:
         blocks.append(f"# {title}")
 
-    meta = content_root.select_one("#meta")
+    meta = content_root.select_one("#meta") or soup.select_one("#meta")
     if meta:
         meta_lines = _render_meta(meta)
         if meta_lines:
             blocks.append("\n".join(meta_lines))   # lista Markdown unica
         meta.decompose()          # evita che venga riletto come sezione
 
+    if bling_lines:
+        blocks.append("\n".join(bling_lines))
+
+    branch = _branch(url, resolved)
+    include_tables = _tables_enabled(branch)
+
+    allowed = _allowed_tables(content_root, branch) if include_tables else None
+
     section_blocks: list[str] = []
     for wrapper in _iter_sections(content_root):
-        section_blocks.extend(_render_wrapper(wrapper))
+        section_blocks.extend(_render_wrapper(wrapper, include_tables, allowed))
 
     if not section_blocks:
-        section_blocks = _fallback_blocks(content_root)
+        section_blocks = _fallback_blocks(content_root, include_tables)
 
     blocks.extend(section_blocks)
 
     parsed_text = _finalize(blocks)
 
     result = build_result(url, domain, title, resolved, parsed_text)
-    result["branch"] = _branch(url, resolved)
+    result["branch"] = branch
     result["_uncommented_blocks"] = uncommented    # solo debug, ignorato dall'API
     return result

@@ -11,9 +11,22 @@ from src.services.evaluator import token_level_eval
 app = FastAPI(title="Pipeline di Parsing Web")
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DOMAINS_FILE = BASE_DIR / "domains.json"
-GSDATA_DIR = BASE_DIR / "gsdata"
+BASE_DIR = Path(__file__).resolve().parents[1]      # /app in Docker, backend/ in locale
+
+
+def _resolve(name: str) -> Path:
+    """
+    Cerca il file/cartella accanto a src/ (caso Docker) e poi nella root del
+    progetto (caso esecuzione locale con uvicorn da backend/).
+    """
+    for candidate in (BASE_DIR / name, BASE_DIR.parent / name):
+        if candidate.exists():
+            return candidate
+    return BASE_DIR / name          # inesistente: l'errore verrà gestito a valle
+
+
+DOMAINS_FILE = _resolve("domains.json")
+GSDATA_DIR = _resolve("gsdata")
 
 
 def normalize_domain(domain: str) -> str:
@@ -282,3 +295,55 @@ def full_gs_eval(domain: str):
             "f1": sum(f1s) / len(f1s),
         }
     }
+
+from urllib.parse import urlparse
+
+from src.services.evaluator import tokenize
+
+
+@app.get("/debug_eval")
+def debug_eval(url: str, top: int = 60):
+    """Diagnosi di una singola entry del GS. Da rimuovere prima della consegna."""
+    host = urlparse(url).hostname or ""
+    entry = next((e for e in load_gold_standard_for_domain(host) if e.get("url") == url), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"URL non presente nel Gold Standard: {url}")
+
+    parser, domain = get_parser(url)
+    if parser is None:
+        raise HTTPException(status_code=400, detail=f"Dominio non supportato: {domain}")
+
+    parsed = parser(url, html_text=entry.get("html_text", "")).get("parsed_text", "")
+    gold = entry.get("gold_text", "")
+
+    pt, gt = tokenize(parsed), tokenize(gold)
+    return {
+        "token_level_eval": token_level_eval(parsed, gold),
+        "conteggi": {
+            "token_parser": len(pt),
+            "token_gold": len(gt),
+            "in_comune": len(pt & gt),
+            "caratteri_parsed": len(parsed),
+            "caratteri_gold": len(gold),
+        },
+        "extra_abbassano_precision": sorted(pt - gt)[:top],
+        "mancanti_abbassano_recall": sorted(gt - pt)[:top],
+        "parsed_text_anteprima": parsed[:1500],
+    }
+
+@app.get("/debug_gs_health")
+def debug_gs_health(domain: str):
+    """Verifica la coerenza interna del GS. Da rimuovere prima della consegna."""
+    from bs4 import BeautifulSoup
+
+    report = []
+    for entry in load_gold_standard_for_domain(domain):
+        html = entry.get("html_text") or ""
+        soup = BeautifulSoup(html, "html.parser")
+        report.append({
+            "url": entry.get("url"),
+            "titolo_dentro_html_text": soup.title.get_text(strip=True) if soup.title else None,
+            "caratteri_html": len(html),
+            "caratteri_gold": len(entry.get("gold_text") or ""),
+        })
+    return {"entries": report}
