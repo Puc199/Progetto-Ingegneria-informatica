@@ -1,6 +1,12 @@
 import re
 from bs4 import Tag
-from src.parsers.base_parser import fetch_html, make_soup, extract_page_title, build_result
+from src.parsers.base_parser import (
+    BaseParser,
+    build_result,
+    extract_page_title,
+    fetch_html,
+    make_soup,
+)
 
 
 STOP_HEADINGS = {
@@ -250,28 +256,53 @@ def parse_section_children(container: Tag, blocks: list[str]) -> bool:
     return False
 
 
-def parse_wikipedia(url: str, htmltext: str | None = None) -> dict:
-    html = htmltext if htmltext is not None else fetch_html(url)
-    soup = make_soup(html)
+class WikipediaParser(BaseParser):
+    """
+    Parser di en.wikipedia.org.
 
-    title = extract_page_title(soup)
-    title = re.sub(r"\s*-\s*Wikipedia.*$", "", title).strip()
+    Wikipedia e' il caso piu' semplice dei quattro: il contenuto sta tutto
+    dentro '#mw-content-text' ed e' testo scritto da esseri umani, non dati
+    tabellari. Il lavoro consiste quasi solo nel togliere l'apparato
+    enciclopedico che circonda l'articolo — indice, note, riquadri laterali,
+    box di avviso — e nel fermarsi dove finisce il testo vero, cioe' al primo
+    titolo fra References, Notes, See also e simili (STOP_HEADINGS).
+    """
 
-    content_root = soup.select_one("#mw-content-text")
-    if content_root is None:
-        content_root = soup.select_one(".mw-parser-output")
+    canonical_domain = "en.wikipedia.org"
 
-    if content_root is None:
-        return build_result(url, "en.wikipedia.org", title, html, "")
+    def fetch(self, url: str) -> str:
+        """
+        Scarica via HTTP semplice, senza browser headless.
 
-    for selector in REMOVE_SELECTORS:
-        for tag in content_root.select(selector):
-            tag.decompose()
+        Le pagine di Wikipedia sono renderizzate lato server: l'HTML e' gia'
+        completo nella prima risposta. Aprire Chromium darebbe lo stesso
+        risultato in molti secondi in piu'.
+        """
+        return fetch_html(url)
 
-    parser_output = content_root.select_one(".mw-parser-output") or content_root
+    def domain_for(self, url: str) -> str:
+        return self.canonical_domain
 
-    blocks = [f"# {title}"]
-    parse_section_children(parser_output, blocks)
-    parsedtext = clean_output("\n\n".join(blocks).strip())
+    def extract_title(self, soup) -> str:
+        """Titolo senza il suffisso ' - Wikipedia' che il sito aggiunge al <title>."""
+        title = extract_page_title(soup)
+        return re.sub(r"\s*-\s*Wikipedia.*$", "", title).strip()
 
-    return build_result(url, "en.wikipedia.org", title, html, parsedtext)
+    def extract_blocks(self, soup, url: str, html: str) -> list[str]:
+        content_root = soup.select_one("#mw-content-text") or soup.select_one(".mw-parser-output")
+        if content_root is None:
+            return []
+
+        for selector in REMOVE_SELECTORS:
+            for tag in content_root.select(selector):
+                tag.decompose()
+
+        parser_output = content_root.select_one(".mw-parser-output") or content_root
+
+        blocks: list[str] = []
+        parse_section_children(parser_output, blocks)
+        return blocks
+
+    def finalize(self, blocks: list[str]) -> str:
+        """clean_output toglie gli artefatti del markup di MediaWiki (data-mw, mw-*)."""
+        return clean_output("\n\n".join(blocks).strip())

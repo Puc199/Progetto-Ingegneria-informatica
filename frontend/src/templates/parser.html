@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% set active = 'parser' %}
+{% block title %}Parser & Evaluation{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Prova un parser</h2>
+    <form action="/parser" method="post">
+        <div class="field">
+            <label for="url">URL da analizzare</label>
+            <input type="text" id="url" name="url" placeholder="https://en.wikipedia.org/wiki/Minerva"
+                   value="{{ submitted_url or '' }}">
+        </div>
+
+        <div class="field">
+            <label for="gs_url">oppure scegline uno gia' nel Gold Standard</label>
+            <select id="gs_url" name="gs_url">
+                <option value="">— nessuna selezione —</option>
+                {% for url in gs_urls %}
+                    <option value="{{ url }}" {% if url == submitted_url %}selected{% endif %}>{{ url }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="field">
+            <label>Modalita'</label>
+            <div class="radios">
+                <label><input type="radio" name="mode" value="live"
+                              {% if mode != 'local' %}checked{% endif %}> Live — scarica la pagina adesso</label>
+                <label><input type="radio" name="mode" value="local"
+                              {% if mode == 'local' %}checked{% endif %}> Local — usa l'HTML del database</label>
+            </div>
+        </div>
+
+        <button type="submit">Esegui</button>
+        <span class="muted">La modalita' live apre un browser headless: puo' richiedere qualche decina di secondi.</span>
+    </form>
+</div>
+
+{% if parse_result %}
+    <div class="card">
+        <h2>Risultato</h2>
+        <table>
+            <tbody>
+                <tr><th>URL</th><td>{{ parse_result.url }}</td></tr>
+                <tr><th>Dominio</th><td>{{ parse_result.domain }}</td></tr>
+                <tr><th>Titolo</th><td>{{ parse_result.title }}</td></tr>
+                <tr><th>Dimensioni</th>
+                    <td>HTML grezzo {{ parse_result.html_text | length }} caratteri ·
+                        testo estratto {{ parse_result.parsed_text | length }} caratteri</td></tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2>html_text (grezzo)</h2>
+            <pre>{{ parse_result.html_text[:20000] }}{% if parse_result.html_text | length > 20000 %}
+
+[... troncato nella visualizzazione, nel database c'e' tutto ...]{% endif %}</pre>
+        </div>
+        <div class="card">
+            <h2>parsed_text (Markdown)</h2>
+            <pre>{{ parse_result.parsed_text }}</pre>
+        </div>
+    </div>
+{% endif %}
+
+{% if gold_result %}
+    <div class="card">
+        <h2>gold_text (riferimento)</h2>
+        <pre>{{ gold_result.gold_text }}</pre>
+    </div>
+{% elif parse_result %}
+    <div class="card">
+        <p class="muted" style="margin:0">
+            Questo URL non e' nel Gold Standard, quindi non ci sono metriche da calcolare.
+            Puoi aggiungerlo dalla pagina <a href="/gold-standard">Gold Standard</a>.
+        </p>
+    </div>
+{% endif %}
+
+{% if eval_result %}
+    <div class="card">
+        <h2>Metriche automatiche</h2>
+        <table>
+            <thead><tr><th>Metrica</th><th class="num">Precision</th><th class="num">Recall</th><th class="num">F1</th></tr></thead>
+            <tbody>
+            {% for name, scores in eval_result.items() %}
+                {% if scores %}
+                <tr>
+                    <td>{{ name }}</td>
+                    <td class="num">{{ '%.3f' | format(scores.precision) }}</td>
+                    <td class="num">{{ '%.3f' | format(scores.recall) }}</td>
+                    <td class="num">{{ '%.3f' | format(scores.f1) }}</td>
+                </tr>
+                {% endif %}
+            {% endfor %}
+            </tbody>
+        </table>
+        <p class="muted" style="margin-bottom:0">
+            <strong>token_level_eval</strong> confronta gli insiemi di token: misura contenuto e rumore,
+            ignora ordine e ripetizioni. <strong>sequence_eval</strong> confronta le sequenze: penalizza
+            i blocchi ripetuti e il testo giusto ma scomposto.
+        </p>
+    </div>
+{% endif %}
+
+{% if judge_result %}
+    <div class="card">
+        <h2>Giudizio dell'LLM</h2>
+        <table>
+            <tbody>
+                <tr><th>Modello</th><td>{{ judge_result.model_name }}</td></tr>
+                <tr><th>Punteggio</th><td><strong>{{ judge_result.judge_score }}</strong> / 5</td></tr>
+                <tr><th>Feedback</th><td>{{ judge_result.judge_feedback }}</td></tr>
+                <tr><th>Formato JSON</th>
+                    <td>{% if judge_result.parse_ok %}<span class="badge ok">rispettato</span>
+                        {% else %}<span class="badge ko">fallback</span>{% endif %}</td></tr>
+            </tbody>
+        </table>
+    </div>
+{% endif %}
+{% endblock %}

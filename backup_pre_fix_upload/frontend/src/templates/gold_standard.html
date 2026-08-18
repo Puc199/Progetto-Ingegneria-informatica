@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% set active = 'gold' %}
+{% block title %}Gold Standard Builder{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Dominio</h2>
+    <form action="/gold-standard" method="get" class="row">
+        <div class="field">
+            <label for="domain">Scegli il dominio su cui lavorare</label>
+            <select id="domain" name="domain">
+                {% for d in domains %}
+                    <option value="{{ d }}" {% if d == selected_domain %}selected{% endif %}>{{ d }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="secondary">Cambia</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>1a. Completa una pagina gia' scaricata ({{ pending_urls | length }} in attesa)</h2>
+    {% if pending_urls %}
+        <form action="/gold-standard/fetch" method="post" class="row">
+            <input type="hidden" name="domain" value="{{ selected_domain }}">
+            <input type="hidden" name="source" value="db">
+            <div class="field">
+                <label for="db_url">Pagine con l'HTML gia' nel database, in attesa del gold_text</label>
+                <select id="db_url" name="db_url">
+                    {% for url in pending_urls %}
+                        <option value="{{ url }}" {% if url == fetched_url %}selected{% endif %}>{{ url }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <button type="submit">Apri</button>
+        </form>
+        <p class="muted" style="margin-bottom:0">
+            Riusa l'HTML gia' salvato, senza riscaricare niente. E' la via da seguire per
+            i domini che rifiutano le richieste automatiche: un nuovo download
+            restituirebbe una pagina di errore e sovrascriverebbe l'HTML buono.
+        </p>
+    {% else %}
+        <p class="muted" style="margin:0">
+            Nessuna pagina in attesa: tutte quelle scaricate hanno gia' un testo di riferimento.
+        </p>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>1b. Oppure scarica una pagina nuova</h2>
+    <form action="/gold-standard/fetch" method="post" class="row">
+        <input type="hidden" name="domain" value="{{ selected_domain }}">
+        <input type="hidden" name="source" value="live">
+        <div class="field">
+            <label for="fetch_url">URL della pagina da aggiungere</label>
+            <input type="text" id="fetch_url" name="url"
+                   placeholder="https://{{ selected_domain }}/..."
+                   value="{% if not from_db %}{{ fetched_url or '' }}{% endif %}">
+        </div>
+        <button type="submit">Scarica</button>
+    </form>
+    <p class="muted" style="margin-bottom:0">
+        Il download usa lo stesso percorso del parser, quindi l'HTML salvato e'
+        esattamente quello su cui il parser verra' valutato.
+    </p>
+</div>
+
+{% if fetched %}
+<div class="card">
+    <h2>2. Copia il testo informativo e incollalo qui sotto</h2>
+    <p class="muted" style="margin-top:0">
+        Pagina: <strong>{{ fetched.url }}</strong> —
+        HTML {% if from_db %}letto dal database{% else %}appena scaricato{% endif %},
+        {{ fetched.html_text | length }} caratteri.
+    </p>
+    <p class="muted">
+        Apri la pagina nel browser e seleziona a mano <strong>solo</strong> titolo e corpo:
+        niente menu di navigazione, footer, sidebar o banner. Il testo di riferimento va
+        in testo semplice, senza Markdown.
+    </p>
+
+    <div class="grid" style="margin-bottom:1rem">
+        <div>
+            <h2 style="margin-top:0">html_text scaricato</h2>
+            <pre>{{ fetched.html_text[:12000] }}{% if fetched.html_text | length > 12000 %}
+
+[... troncato nella visualizzazione: verra' salvato per intero ...]{% endif %}</pre>
+        </div>
+        <div>
+            <h2 style="margin-top:0">parsed_text, come lo estrae il parser</h2>
+            <pre>{{ fetched.parsed_text }}</pre>
+            <p class="muted">
+                Usalo come guida su <em>quali sezioni</em> copiare, mai come sorgente
+                da cui copiare: un gold standard ricavato dall'output del parser
+                misurerebbe il parser contro se stesso.
+            </p>
+        </div>
+    </div>
+
+    <form action="/gold-standard/save" method="post">
+        <input type="hidden" name="domain" value="{{ selected_domain }}">
+        <input type="hidden" name="url" value="{{ fetched.url }}">
+        <input type="hidden" name="html_text" value="{{ fetched.html_text }}">
+        <div class="field">
+            <label for="gold_text">gold_text — testo di riferimento estratto a mano</label>
+            <textarea id="gold_text" name="gold_text" rows="14" required
+                      placeholder="Incolla qui il testo copiato dalla pagina..."></textarea>
+        </div>
+        <button type="submit">Salva nel database</button>
+        <span class="muted">Salva insieme la risorsa web e il suo gold standard.</span>
+    </form>
+</div>
+{% endif %}
+
+<div class="card">
+    <h2>Entry gia' presenti per {{ selected_domain or '—' }} ({{ gs_urls | length }})</h2>
+    {% if gs_urls %}
+        <table>
+            <thead><tr><th>URL</th><th style="width:230px">Azioni</th></tr></thead>
+            <tbody>
+            {% for url in gs_urls %}
+                <tr>
+                    <td style="word-break:break-all">{{ url }}</td>
+                    <td>
+                        <form action="/gold-standard/delete" method="post" style="display:inline">
+                            <input type="hidden" name="domain" value="{{ selected_domain }}">
+                            <input type="hidden" name="url" value="{{ url }}">
+                            <input type="hidden" name="scope" value="gold">
+                            <button type="submit" class="secondary">Solo gold_text</button>
+                        </form>
+                        <form action="/gold-standard/delete" method="post" style="display:inline">
+                            <input type="hidden" name="domain" value="{{ selected_domain }}">
+                            <input type="hidden" name="url" value="{{ url }}">
+                            <input type="hidden" name="scope" value="resource">
+                            <button type="submit" class="danger">Tutta la risorsa</button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        <p class="muted" style="margin-bottom:0">
+            "Solo gold_text" lascia l'HTML nel database, cosi' puoi riscrivere il testo di
+            riferimento senza riscaricare la pagina. "Tutta la risorsa" cancella anche
+            l'HTML, e il gold standard sparisce a cascata per via della foreign key.
+        </p>
+    {% else %}
+        <p class="muted" style="margin:0">Nessuna entry per questo dominio.</p>
+    {% endif %}
+</div>
+{% endblock %}

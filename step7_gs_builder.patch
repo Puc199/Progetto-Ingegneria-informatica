@@ -1,0 +1,274 @@
+diff --git a/backend/src/schemas.py b/backend/src/schemas.py
+index 74df9d5..cdeec63 100644
+--- a/backend/src/schemas.py
++++ b/backend/src/schemas.py
+@@ -77,6 +77,18 @@ class GoldStandardUrlsResponse(BaseModel):
+     gold_standard_urls: List[str]
+ 
+ 
++class WebResourceUrlsResponse(BaseModel):
++    """
++    URL presenti in web_resources per un dominio.
++
++    Non e' fra gli endpoint richiesti dalla specifica: e' un'aggiunta che
++    serve alla pagina di costruzione del Gold Standard per sapere quali
++    pagine sono gia' scaricate e attendono solo il testo di riferimento.
++    """
++
++    web_resource_urls: List[str]
++
++
+ # ---------------------------------------------------------------------------
+ # Valutazione
+ # ---------------------------------------------------------------------------
+diff --git a/backend/src/server.py b/backend/src/server.py
+index fc8768c..b37a922 100644
+--- a/backend/src/server.py
++++ b/backend/src/server.py
+@@ -41,6 +41,7 @@ from src.schemas import (
+     StatusResponse,
+     SystemStatusResponse,
+     UrlRequest,
++    WebResourceUrlsResponse,
+ )
+ from src.services import bootstrap, database, repository
+ from src.services.evaluator import evaluate_all
+@@ -241,6 +242,19 @@ def get_gold_standard_urls(domain: str = Query(...)) -> GoldStandardUrlsResponse
+     return GoldStandardUrlsResponse(gold_standard_urls=repository.list_gold_standard_urls(domain))
+ 
+ 
++@app.get("/web_resource_urls", response_model=WebResourceUrlsResponse)
++def get_web_resource_urls(domain: str = Query(...)) -> WebResourceUrlsResponse:
++    """
++    URL gia' presenti in web_resources per un dominio.
++
++    Aggiunto oltre alla specifica: serve alla pagina di costruzione del Gold
++    Standard per elencare le pagine gia' scaricate a cui manca solo il testo
++    di riferimento, senza doverle riscaricare.
++    """
++    require_supported_domain(domain)
++    return WebResourceUrlsResponse(web_resource_urls=repository.list_web_resource_urls(domain))
++
++
+ @app.get("/full_gold_standard", response_model=FullGoldStandardResponse)
+ def get_full_gold_standard(domain: str = Query(...)) -> FullGoldStandardResponse:
+     """Tutte le entry del Gold Standard di un dominio. Mantenuto dall'esonero."""
+diff --git a/backend/src/services/repository.py b/backend/src/services/repository.py
+index 7d422c5..e5e8905 100644
+--- a/backend/src/services/repository.py
++++ b/backend/src/services/repository.py
+@@ -132,6 +132,22 @@ def list_gold_standard_urls(domain: str) -> list[str]:
+     return [row["url"] for row in rows]
+ 
+ 
++def list_web_resource_urls(domain: str) -> list[str]:
++    """
++    URL delle risorse web di un dominio, indipendentemente dal gold standard.
++
++    Serve alla Web UI: le pagine caricate dai JSON all'avvio hanno gia' l'HTML
++    in web_resources anche quando il gold_text non e' ancora stato scritto.
++    Elencarle permette di completarle senza doverle riscaricare, che su alcuni
++    domini non sarebbe nemmeno possibile.
++    """
++    rows = fetch_all(
++        "SELECT url FROM web_resources WHERE domain = ? ORDER BY url",
++        (domain,),
++    )
++    return [row["url"] for row in rows]
++
++
+ def gold_standard_exists(url: str) -> bool:
+     """Vero se l'URL ha gia' un testo di riferimento."""
+     return fetch_one("SELECT 1 AS present FROM gold_standard WHERE url = ?", (url,)) is not None
+diff --git a/frontend/src/frontend.py b/frontend/src/frontend.py
+index 07de80f..b2df46b 100644
+--- a/frontend/src/frontend.py
++++ b/frontend/src/frontend.py
+@@ -96,6 +96,12 @@ def load_gs_urls(domain: str) -> list[str]:
+     return data.get("gold_standard_urls", []) if not error else []
+ 
+ 
++def load_web_resource_urls(domain: str) -> list[str]:
++    """URL gia' scaricati per un dominio, con o senza testo di riferimento."""
++    data, error = api_call("GET", "/web_resource_urls", params={"domain": domain})
++    return data.get("web_resource_urls", []) if not error else []
++
++
+ def load_all_gs_urls(domains: list[str]) -> list[str]:
+     """URL del Gold Standard di tutti i domini, per il menu a tendina."""
+     urls: list[str] = []
+@@ -108,6 +114,13 @@ def render(request: Request, template: str, **context: Any) -> HTMLResponse:
+     """Rende un template passando sempre il contesto comune a tutte le pagine."""
+     context.setdefault("error", None)
+     context.setdefault("message", None)
++    # Valori di riserva: un template non deve rompersi solo perche' una via
++    # d'errore ha passato meno contesto di quella normale.
++    context.setdefault("gs_urls", [])
++    context.setdefault("pending_urls", [])
++    context.setdefault("fetched", None)
++    context.setdefault("fetched_url", "")
++    context.setdefault("from_db", False)
+     return templates.TemplateResponse(request, template, {"request": request, **context})
+ 
+ 
+@@ -224,11 +237,16 @@ def gold_standard_page(request: Request, domain: str = "") -> HTMLResponse:
+     domains, error = load_domains()
+     selected = domain or (domains[0] if domains else "")
+ 
++    gs_urls = load_gs_urls(selected) if selected else []
++    all_urls = load_web_resource_urls(selected) if selected else []
++
+     return render(
+         request, "gold_standard.html",
+         domains=domains,
+         selected_domain=selected,
+-        gs_urls=load_gs_urls(selected) if selected else [],
++        gs_urls=gs_urls,
++        # Pagine gia' scaricate a cui manca solo il testo di riferimento.
++        pending_urls=[u for u in all_urls if u not in gs_urls],
+         error=error,
+     )
+ 
+@@ -236,27 +254,46 @@ def gold_standard_page(request: Request, domain: str = "") -> HTMLResponse:
+ @app.post("/gold-standard/fetch", response_class=HTMLResponse)
+ def gold_standard_fetch(request: Request,
+                         domain: str = Form(...),
+-                        url: str = Form(...)) -> HTMLResponse:
++                        url: str = Form(""),
++                        db_url: str = Form(""),
++                        source: str = Form("live")) -> HTMLResponse:
+     """
+-    Scarica la pagina e ne mostra l'HTML grezzo.
++    Prepara una pagina per la scrittura del testo di riferimento.
++
++    Due sorgenti possibili:
+ 
+-    L'HTML mostrato serve a due cose: verificare che il download sia andato a
+-    buon fine, e poterlo copiare per aprirlo in un browser da cui selezionare
+-    a mano il testo informativo.
++      live  scarica la pagina adesso. E' la via normale per aggiungere un URL
++            nuovo.
++      db    riusa l'HTML gia' salvato in web_resources. Serve alle pagine
++            caricate dai JSON all'avvio e, soprattutto, ai domini che
++            rifiutano le richieste automatiche: li' un nuovo download
++            restituirebbe una pagina di errore e sovrascriverebbe l'HTML buono.
+     """
+     domains, _ = load_domains()
++    use_db = source == "db"
++    target = (db_url if use_db else url).strip()
++
++    if not target:
++        gs_urls = load_gs_urls(domain)
++        return render(request, "gold_standard.html", domains=domains,
++                      selected_domain=domain, gs_urls=gs_urls,
++                      pending_urls=[u for u in load_web_resource_urls(domain) if u not in gs_urls],
++                      error="Indica un URL da scaricare oppure scegline uno gia' nel database.")
+ 
+     parse_result, error = api_call("POST", "/parse",
+-                                   json_body={"url": url.strip(), "local": False},
+-                                   timeout=TIMEOUT_LONG)
++                                   json_body={"url": target, "local": use_db},
++                                   timeout=TIMEOUT_SHORT if use_db else TIMEOUT_LONG)
+ 
++    gs_urls = load_gs_urls(domain)
+     return render(
+         request, "gold_standard.html",
+         domains=domains,
+         selected_domain=domain,
+-        gs_urls=load_gs_urls(domain),
+-        fetched_url=url.strip(),
++        gs_urls=gs_urls,
++        pending_urls=[u for u in load_web_resource_urls(domain) if u not in gs_urls],
++        fetched_url=target,
+         fetched=parse_result,
++        from_db=use_db,
+         error=error,
+     )
+ 
+@@ -292,8 +329,10 @@ def gold_standard_save(request: Request,
+                       selected_domain=domain, gs_urls=load_gs_urls(domain),
+                       error=f"Salvataggio del gold standard fallito: {gold_error}")
+ 
++    gs_urls = load_gs_urls(domain)
+     return render(request, "gold_standard.html", domains=domains,
+-                  selected_domain=domain, gs_urls=load_gs_urls(domain),
++                  selected_domain=domain, gs_urls=gs_urls,
++                  pending_urls=[u for u in load_web_resource_urls(domain) if u not in gs_urls],
+                   message=f"Salvato: {url}")
+ 
+ 
+@@ -313,8 +352,10 @@ def gold_standard_delete(request: Request,
+ 
+     _, error = api_call("DELETE", path, json_body={"url": url})
+ 
++    gs_urls = load_gs_urls(domain)
+     return render(request, "gold_standard.html", domains=domains,
+-                  selected_domain=domain, gs_urls=load_gs_urls(domain),
++                  selected_domain=domain, gs_urls=gs_urls,
++                  pending_urls=[u for u in load_web_resource_urls(domain) if u not in gs_urls],
+                   message=None if error else f"Rimosso ({path}): {url}",
+                   error=error)
+ 
+diff --git a/frontend/src/templates/gold_standard.html b/frontend/src/templates/gold_standard.html
+index d9b47a0..922c27c 100644
+--- a/frontend/src/templates/gold_standard.html
++++ b/frontend/src/templates/gold_standard.html
+@@ -19,14 +19,43 @@
+ </div>
+ 
+ <div class="card">
+-    <h2>1. Scarica la pagina</h2>
++    <h2>1a. Completa una pagina gia' scaricata ({{ pending_urls | length }} in attesa)</h2>
++    {% if pending_urls %}
++        <form action="/gold-standard/fetch" method="post" class="row">
++            <input type="hidden" name="domain" value="{{ selected_domain }}">
++            <input type="hidden" name="source" value="db">
++            <div class="field">
++                <label for="db_url">Pagine con l'HTML gia' nel database, in attesa del gold_text</label>
++                <select id="db_url" name="db_url">
++                    {% for url in pending_urls %}
++                        <option value="{{ url }}" {% if url == fetched_url %}selected{% endif %}>{{ url }}</option>
++                    {% endfor %}
++                </select>
++            </div>
++            <button type="submit">Apri</button>
++        </form>
++        <p class="muted" style="margin-bottom:0">
++            Riusa l'HTML gia' salvato, senza riscaricare niente. E' la via da seguire per
++            i domini che rifiutano le richieste automatiche: un nuovo download
++            restituirebbe una pagina di errore e sovrascriverebbe l'HTML buono.
++        </p>
++    {% else %}
++        <p class="muted" style="margin:0">
++            Nessuna pagina in attesa: tutte quelle scaricate hanno gia' un testo di riferimento.
++        </p>
++    {% endif %}
++</div>
++
++<div class="card">
++    <h2>1b. Oppure scarica una pagina nuova</h2>
+     <form action="/gold-standard/fetch" method="post" class="row">
+         <input type="hidden" name="domain" value="{{ selected_domain }}">
++        <input type="hidden" name="source" value="live">
+         <div class="field">
+             <label for="fetch_url">URL della pagina da aggiungere</label>
+-            <input type="text" id="fetch_url" name="url" required
++            <input type="text" id="fetch_url" name="url"
+                    placeholder="https://{{ selected_domain }}/..."
+-                   value="{{ fetched_url or '' }}">
++                   value="{% if not from_db %}{{ fetched_url or '' }}{% endif %}">
+         </div>
+         <button type="submit">Scarica</button>
+     </form>
+@@ -39,6 +68,11 @@
+ {% if fetched %}
+ <div class="card">
+     <h2>2. Copia il testo informativo e incollalo qui sotto</h2>
++    <p class="muted" style="margin-top:0">
++        Pagina: <strong>{{ fetched.url }}</strong> —
++        HTML {% if from_db %}letto dal database{% else %}appena scaricato{% endif %},
++        {{ fetched.html_text | length }} caratteri.
++    </p>
+     <p class="muted">
+         Apri la pagina nel browser e seleziona a mano <strong>solo</strong> titolo e corpo:
+         niente menu di navigazione, footer, sidebar o banner. Il testo di riferimento va

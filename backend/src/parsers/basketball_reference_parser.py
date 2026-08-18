@@ -34,7 +34,12 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup, Comment, NavigableString, Tag
 
-from src.parsers.base_parser import fetch_html_crawl4ai, make_soup, build_result
+from src.parsers.base_parser import (
+    BaseParser,
+    build_result,
+    fetch_html_crawl4ai,
+    make_soup,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -545,73 +550,96 @@ def _collect(soup: BeautifulSoup, branch: str, include_tables: bool,
     return blocks
 
 
-def parse_basketball_reference(
-    url: str,
-    html_text: Optional[str] = None,
-    htmltext: Optional[str] = None,
-    html: Optional[str] = None,
-    raw_html: Optional[str] = None,
-    content: Optional[str] = None,
-    **kwargs,
-) -> dict:
-    resolved = (
-        html_text or htmltext or html or raw_html or content
-        or kwargs.get("html_text") or kwargs.get("htmltext")
-        or kwargs.get("html") or kwargs.get("raw_html") or kwargs.get("content")
-    )
-    if not resolved or not str(resolved).strip() or str(resolved).strip() == "string":
-        resolved = fetch_html_crawl4ai(url)
+class BasketballReferenceParser(BaseParser):
+    """
+    Parser di www.basketball-reference.com.
 
-    domain = _extract_domain(url)
+    E' il dominio piu' articolato dei quattro, per due ragioni.
 
-    if not resolved:
-        result = build_result(url, domain, "", "", "")
-        result["branch"] = "generic"
-        return result
+    La prima: il sito nasconde gran parte del contenuto dentro commenti HTML,
+    e lo ricompone in JavaScript nel browser. Un parser che leggesse l'HTML
+    cosi' com'e' perderebbe meta' pagina. Per questo 'prepare' riporta i
+    commenti nel DOM prima di qualunque altra cosa, ed e' anche il motivo per
+    cui il fetch restituisce result.html e non cleaned_html: quest'ultimo i
+    commenti li butta via.
 
-    soup = make_soup(resolved)
+    La seconda: le pagine non sono tutte uguali. Una scheda giocatore, una
+    pagina squadra, una serie di playoff e la scheda di un dirigente hanno
+    strutture diverse e, soprattutto, un diverso rapporto fra testo e tabelle.
+    Il ramo viene riconosciuto dall'URL e decide quali tabelle sono contenuto
+    informativo e quali no (TABLES_BY_BRANCH, TABLE_SCOPE_BY_BRANCH).
+    """
 
-    # 1) contenuto nascosto nei commenti -> DOM  (il fix decisivo)
-    uncommented = _uncomment_hidden_content(soup)
+    canonical_domain = "www.basketball-reference.com"
 
-    # 2) titolo e bacheca dei premi PRIMA di rimuovere il rumore
-    title = _extract_title(soup)
+    def parse(self, url: str, html_text: Optional[str] = None) -> dict:
+        """
+        Ridefinito per una ragione sola: la bacheca dei premi.
 
-    # <ul id="bling">: su alcune pagine sta fuori da #meta, va preso a parte
-    bling_lines: list[str] = []
-    bling = soup.select_one("#bling")
-    if bling:
+        L'elenco dei titoli vinti sta in '<ul id="bling">', che su alcune
+        pagine e' fuori da '#meta' e viene intercettato dai selettori di
+        rumore. Va quindi letto fra la preparazione dell'albero e la pulizia,
+        cioe' in un punto che il template method non prevede. Il resto della
+        sequenza resta identico a quello della classe base.
+        """
+        html = html_text if html_text and str(html_text).strip() else self.fetch(url)
+        domain = self.domain_for(url)
+
+        if not html:
+            return build_result(url, domain, "", "", "")
+
+        soup = make_soup(html)
+        self.prepare(soup)
+
+        title = self.extract_title(soup)
+        bling_lines = self._bling(soup)
+
+        _strip_noise(soup)
+
+        blocks: list[str] = []
+        if title:
+            blocks.append(f"# {title}")
+        if bling_lines:
+            blocks.append("\n".join(bling_lines))
+        blocks.extend(self.extract_blocks(soup, url, html))
+
+        return build_result(url, domain, title, html, self.finalize(blocks))
+
+    def prepare(self, soup) -> None:
+        """Riporta nel DOM le tabelle che il sito nasconde dentro commenti HTML."""
+        _uncomment_hidden_content(soup)
+
+    def extract_title(self, soup) -> str:
+        return _extract_title(soup)
+
+    def extract_blocks(self, soup, url: str, html: str) -> list[str]:
+        branch = _branch(url, html)
+        include_tables = _tables_enabled(branch)
+
+        body = _collect(soup, branch, include_tables, aggressive=True)
+
+        # Paracadute: se la pulizia aggressiva ha svuotato la pagina (selettori
+        # di rumore troppo larghi su una variante di markup), si riparte da capo
+        # con una pulizia minima. Meglio un po' di rumore che una pagina vuota.
+        if not body:
+            retry = make_soup(html)
+            _uncomment_hidden_content(retry)
+            body = _collect(retry, branch, include_tables, aggressive=False)
+
+        return body
+
+    def finalize(self, blocks: list[str]) -> str:
+        return _finalize(blocks)
+
+    @staticmethod
+    def _bling(soup) -> list[str]:
+        """Bacheca dei premi: '<ul id="bling">', da leggere prima della pulizia."""
+        lines: list[str] = []
+        bling = soup.select_one("#bling")
+        if not bling:
+            return lines
         for item in bling.find_all("li"):
             text = _clean_line(item.get_text(" ", strip=True))
             if _keep_line(text):
-                bling_lines.append(f"- {text}")
-
-    # 3) pulizia
-    _strip_noise(soup)
-
-    branch = _branch(url, resolved)
-    include_tables = _tables_enabled(branch)
-
-    body = _collect(soup, branch, include_tables, aggressive=True)
-
-    # Paracadute: se la pulizia aggressiva ha svuotato la pagina (selettori di
-    # rumore troppo larghi su una variante di markup), si riparte da capo con
-    # una pulizia minima. Meglio un po' di rumore che una pagina vuota.
-    if not body:
-        retry = make_soup(resolved)
-        _uncomment_hidden_content(retry)
-        body = _collect(retry, branch, include_tables, aggressive=False)
-
-    blocks: list[str] = []
-    if title:
-        blocks.append(f"# {title}")
-    if bling_lines:
-        blocks.append("\n".join(bling_lines))
-    blocks.extend(body)
-
-    parsed_text = _finalize(blocks)
-
-    result = build_result(url, domain, title, resolved, parsed_text)
-    result["branch"] = branch
-    result["_uncommented_blocks"] = uncommented    # solo debug, ignorato dall'API
-    return result
+                lines.append(f"- {text}")
+        return lines

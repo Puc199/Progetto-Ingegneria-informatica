@@ -1,0 +1,137 @@
+{
+  "backend/src/__init__.py": {
+    "mtime": 1786625388.7316065,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "backend/src/parsers/__init__.py": {
+    "mtime": 1786625388.7326362,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "backend/src/parsers/base_parser.py": {
+    "mtime": 1786625388.7356355,
+    "ast_hash": "04d472f998dddcc3dca92726145b0e49",
+    "semantic_hash": "04d472f998dddcc3dca92726145b0e49"
+  },
+  "backend/src/parsers/basketball_reference_parser.py": {
+    "mtime": 1786625388.7356355,
+    "ast_hash": "da25ca8843d47843107bdc72294f95f0",
+    "semantic_hash": "da25ca8843d47843107bdc72294f95f0"
+  },
+  "backend/src/parsers/morningstar_parser.py": {
+    "mtime": 1786625388.7356355,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "backend/src/parsers/registry.py": {
+    "mtime": 1786625388.7376342,
+    "ast_hash": "f217caf1cab8310467b46c125cdf529b",
+    "semantic_hash": "f217caf1cab8310467b46c125cdf529b"
+  },
+  "backend/src/parsers/tradingview_parser.py": {
+    "mtime": 1786625388.7376342,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "backend/src/parsers/wikipedia_parser.py": {
+    "mtime": 1786625388.7386365,
+    "ast_hash": "82f764f07a02cfdfc2c7e17340ad9097",
+    "semantic_hash": "82f764f07a02cfdfc2c7e17340ad9097"
+  },
+  "backend/src/schemas.py": {
+    "mtime": 1786625388.7386365,
+    "ast_hash": "dbb538c490e565560ae03319836ce8cb",
+    "semantic_hash": "dbb538c490e565560ae03319836ce8cb"
+  },
+  "backend/src/server.py": {
+    "mtime": 1786625388.7386365,
+    "ast_hash": "787b1414c5477ad6852af059200aa891",
+    "semantic_hash": "787b1414c5477ad6852af059200aa891"
+  },
+  "backend/src/services/__init__.py": {
+    "mtime": 1786625388.7396348,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "backend/src/services/evaluator.py": {
+    "mtime": 1786625388.7406356,
+    "ast_hash": "bfb637785027dfb7d26d37eba2fa151d",
+    "semantic_hash": "bfb637785027dfb7d26d37eba2fa151d"
+  },
+  "backend/src/services/goldstandard_service.py": {
+    "mtime": 1786625388.7406356,
+    "ast_hash": "5370de95b6a9bbea051d1d66f50dddd0",
+    "semantic_hash": "5370de95b6a9bbea051d1d66f50dddd0"
+  },
+  "backend/src/services/markdown_utils.py": {
+    "mtime": 1786625388.7406356,
+    "ast_hash": "3774572a24107a0a9ac8041e33ecfbb3",
+    "semantic_hash": "3774572a24107a0a9ac8041e33ecfbb3"
+  },
+  "backend/tools/fix_gs_html.py": {
+    "mtime": 1786625388.7416348,
+    "ast_hash": "603548b4ab7547d7cb3c229f2aefa0d6",
+    "semantic_hash": "603548b4ab7547d7cb3c229f2aefa0d6"
+  },
+  "domains.json": {
+    "mtime": 1786625388.7416348,
+    "ast_hash": "ac9dcfc7c372b13a74acfe53801121f5",
+    "semantic_hash": "ac9dcfc7c372b13a74acfe53801121f5"
+  },
+  "frontend/src/frontend.py": {
+    "mtime": 1786625388.7456353,
+    "ast_hash": "719464fac04b1d8812aeac5114b5d0b3",
+    "semantic_hash": "719464fac04b1d8812aeac5114b5d0b3"
+  },
+  "gsdata/basketballreference_gs.json": {
+    "mtime": 1786625388.758153,
+    "ast_hash": "72f9ba8a72ffd944682ffcc0b53fb9e6",
+    "semantic_hash": "72f9ba8a72ffd944682ffcc0b53fb9e6"
+  },
+  "gsdata/morningstar_gs.json": {
+    "mtime": 1786625388.7646587,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "gsdata/tradingview_gs.json": {
+    "mtime": 1786625388.765659,
+    "ast_hash": "d41d8cd98f00b204e9800998ecf8427e",
+    "semantic_hash": "d41d8cd98f00b204e9800998ecf8427e"
+  },
+  "gsdata/wikipedia_gs.json": {
+    "mtime": 1786625388.7706573,
+    "ast_hash": "1ec02a8a9b578feb9a48bc4d0c38fe1b",
+    "semantic_hash": "1ec02a8a9b578feb9a48bc4d0c38fe1b"
+  },
+  "README.md": {
+    "mtime": 1786625388.7306104,
+    "ast_hash": "41570a45233beee95120eb6b21a32e15",
+    "semantic_hash": "41570a45233beee95120eb6b21a32e15"
+  },
+  "backend/requirements.txt": {
+    "mtime": 1786625388.7306104,
+    "ast_hash": "f777825178e1c139bc5cd8d899155674",
+    "semantic_hash": "f777825178e1c139bc5cd8d899155674"
+  },
+  "docker-compose.yaml": {
+    "mtime": 1786625388.7416348,
+    "ast_hash": "ab79578ba45e74a3bba52e759951fac7",
+    "semantic_hash": "ab79578ba45e74a3bba52e759951fac7"
+  },
+  "frontend/requirements.txt": {
+    "mtime": 1786625388.744634,
+    "ast_hash": "ef9fca9c0003e7ad7f7f1c5bde533c5c",
+    "semantic_hash": "ef9fca9c0003e7ad7f7f1c5bde533c5c"
+  },
+  "frontend/src/templates/index.html": {
+    "mtime": 1786625388.7456353,
+    "ast_hash": "208318f6d8683a8cc96591d20b0b9532",
+    "semantic_hash": "208318f6d8683a8cc96591d20b0b9532"
+  },
+  "report.pdf": {
+    "mtime": 1786625388.772161,
+    "ast_hash": "c9e8510e4482b84984dacb618d42d1b9",
+    "semantic_hash": "c9e8510e4482b84984dacb618d42d1b9"
+  }
+}

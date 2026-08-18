@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% set active = 'stats' %}
+{% block title %}Statistiche{% endblock %}
+
+{% block content %}
+{% if not stats %}
+    <div class="card"><p class="muted" style="margin:0">Nessuna statistica disponibile.</p></div>
+{% else %}
+<div class="card">
+    <h2>Risorse nel database</h2>
+    <table>
+        <thead><tr><th>Dominio</th><th class="num">web_resources</th><th class="num">gold_standard</th></tr></thead>
+        <tbody>
+        {% for domain in domains %}
+            <tr>
+                <td>{{ domain }}</td>
+                <td class="num">{{ stats.web_resources.get(domain, 0) }}</td>
+                <td class="num">{{ stats.gold_standard.get(domain, 0) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="card">
+    <h2>Metriche medie sul Gold Standard</h2>
+    <table>
+        <thead><tr><th>Dominio</th><th>Metrica</th><th class="num">Precision</th><th class="num">Recall</th><th class="num">F1</th></tr></thead>
+        <tbody>
+        {% for domain in domains %}
+            {% set metrics = stats.avg_eval.get(domain, {}) %}
+            {% if metrics %}
+                {% for name, scores in metrics.items() %}
+                <tr>
+                    <td>{% if loop.first %}{{ domain }}{% endif %}</td>
+                    <td>{{ name }}</td>
+                    <td class="num">{{ '%.3f' | format(scores.get('precision', 0)) }}</td>
+                    <td class="num">{{ '%.3f' | format(scores.get('recall', 0)) }}</td>
+                    <td class="num">{{ '%.3f' | format(scores.get('f1', 0)) }}</td>
+                </tr>
+                {% endfor %}
+            {% else %}
+                <tr><td>{{ domain }}</td><td colspan="4" class="muted">nessuna valutazione</td></tr>
+            {% endif %}
+        {% endfor %}
+        </tbody>
+    </table>
+    <p class="muted" style="margin-bottom:0">
+        Soglie di riferimento per l'F1 di token_level_eval: sotto 0.60 scarso,
+        fra 0.60 e 0.80 medio, sopra 0.80 buono.
+    </p>
+</div>
+
+<div class="card">
+    <h2>Giudizio medio dell'LLM</h2>
+    <table>
+        <thead><tr><th>Dominio</th><th class="num">judge_score</th><th class="num">Entry giudicate</th><th class="num">JSON validi</th></tr></thead>
+        <tbody>
+        {% for domain in domains %}
+            {% set judge = stats.avg_eval_judge.get(domain, {}) %}
+            <tr>
+                <td>{{ domain }}</td>
+                <td class="num">{{ '%.2f' | format(judge.get('judge_score', 0)) }} / 5</td>
+                <td class="num">{{ judge.get('judged_entries', 0) | int }}</td>
+                <td class="num">{{ '%.0f%%' | format(judge.get('valid_json_ratio', 0) * 100) }}</td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    <p class="muted" style="margin-bottom:0">
+        "JSON validi" e' la quota di risposte in cui il modello ha rispettato il formato
+        richiesto senza ricorrere al fallback: dice quanto ci si puo' fidare della media
+        a sinistra. I giudizi vengono precalcolati in background all'avvio, quindi subito
+        dopo l'accensione il conteggio puo' essere ancora parziale.
+    </p>
+</div>
+{% endif %}
+
+{% if schema %}
+<div class="card">
+    <h2>Schema del database</h2>
+    {% for table, columns in schema.items() %}
+        <h2 style="font-size:.92rem">{{ table }}</h2>
+        <table style="margin-bottom:1rem">
+            <thead><tr><th>Colonna</th><th>Tipo e chiavi</th></tr></thead>
+            <tbody>
+            {% for column, definition in columns.items() %}
+                <tr><td>{{ column }}</td><td class="muted">{{ definition }}</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

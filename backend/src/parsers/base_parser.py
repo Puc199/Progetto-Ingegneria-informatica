@@ -14,6 +14,9 @@ Modifiche rispetto alla versione precedente:
 
 import asyncio
 import logging
+from abc import ABC, abstractmethod
+from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -32,8 +35,11 @@ RUN_CONFIGS: dict[str, dict] = {
         cache_mode=CacheMode.BYPASS,
         wait_until="domcontentloaded",
         page_timeout=45000,
-        delay_before_return_html=1.5,   # lascia al JS del sito il tempo di
-        scan_full_page=True,            # scommentare le tabelle e caricare il lazy content
+        # Niente scan_full_page: su questo sito le tabelle non sono caricate
+        # pigramente, stanno gia' nell'HTML dentro commenti, ed e'
+        # _uncomment_hidden_content() a reinserirle nel DOM dopo il download.
+        # Far scorrere tutta la pagina costava decine di secondi per niente.
+        delay_before_return_html=0.5,
         excluded_tags=["script", "style", "noscript", "svg", "form"],
         remove_overlay_elements=True,
         exclude_external_links=True,
@@ -140,3 +146,140 @@ def build_result(url: str, domain: str, title: str, html_text: str, parsed_text:
         "html_text": html_text or "",
         "parsed_text": parsed_text or "",
     }
+
+# ---------------------------------------------------------------------------
+# La classe base dei parser
+# ---------------------------------------------------------------------------
+
+class BaseParser(ABC):
+    """
+    Classe base astratta di tutti i parser di dominio.
+
+    Perche' una classe e non quattro funzioni indipendenti. I quattro siti sono
+    diversissimi fra loro, ma il ciclo di vita del parsing e' sempre lo stesso:
+
+        1. si ottiene l'HTML (dal database in fase di valutazione, dalla rete
+           altrimenti)
+        2. lo si trasforma in un albero navigabile
+        3. si prepara l'albero: ogni sito ha il suo rumore da togliere, e
+           Basketball-Reference ha per di piu' del contenuto da riportare alla
+           luce prima di poterlo leggere
+        4. si estrae il titolo
+        5. si estraggono i blocchi informativi, ed e' l'unico passo davvero
+           specifico di ogni sito
+        6. si compone il Markdown finale
+
+    Questo metodo 'parse' e' un template method: fissa la sequenza una volta
+    sola e lascia alle sottoclassi il compito di riempire i singoli passi. Il
+    vantaggio pratico si vede quando si aggiunge un dominio: si scrive una
+    sottoclasse, si implementa 'extract_blocks', e tutto il resto — il fetch
+    con la configurazione Crawl4AI giusta, la gestione dell'HTML vuoto, il
+    formato del dizionario di uscita — arriva gratis e identico agli altri.
+
+    Il vantaggio meno ovvio e' che i quattro parser non possono piu' divergere
+    di nascosto: se domani il formato del risultato cambia, cambia in un punto
+    solo. Prima quel formato era ripetuto quattro volte, e infatti due parser
+    dichiaravano il dominio in un modo e due in un altro.
+
+    Le sottoclassi restano leggere perche' la logica di estrazione, che e'
+    lunga e gia' verificata sul Gold Standard, sta nelle funzioni private di
+    ciascun modulo: la classe descrive *cosa* succede e in che ordine, le
+    funzioni *come*. Il refactoring a oggetti non ha quindi cambiato di una
+    virgola i risultati delle metriche.
+    """
+
+    #: Dominio canonico gestito dalla sottoclasse (es. "en.wikipedia.org").
+    canonical_domain: str = ""
+
+    # -- ciclo di vita ------------------------------------------------------
+
+    def parse(self, url: str, html_text: Optional[str] = None) -> dict:
+        """
+        Estrae il contenuto informativo di una pagina.
+
+        Args:
+            url: indirizzo della pagina, usato anche per riconoscere il tipo
+                 di pagina all'interno del dominio.
+            html_text: HTML gia' disponibile. Se assente la pagina viene
+                       scaricata. Passarlo e' la modalita' usata in fase di
+                       valutazione, dove si lavora sempre sull'HTML statico
+                       salvato nel database.
+
+        Returns:
+            Dizionario con url, domain, title, html_text, parsed_text.
+        """
+        html = html_text if html_text and str(html_text).strip() else self.fetch(url)
+        domain = self.domain_for(url)
+
+        if not html:
+            return build_result(url, domain, "", "", "")
+
+        soup = make_soup(html)
+        self.prepare(soup)
+
+        title = self.extract_title(soup)
+
+        blocks: list[str] = []
+        if title:
+            blocks.append(f"# {title}")
+        blocks.extend(self.extract_blocks(soup, url, html))
+
+        return build_result(url, domain, title, html, self.finalize(blocks))
+
+    def __call__(self, url: str, html_text: Optional[str] = None) -> dict:
+        """
+        Permette di usare un'istanza dove prima c'era una funzione.
+
+        Il registro dei parser espone oggetti, ma i chiamanti continuano a
+        scrivere 'parser(url, html_text=...)': il passaggio a oggetti non ha
+        richiesto di toccare server.py.
+        """
+        return self.parse(url, html_text)
+
+    @property
+    def name(self) -> str:
+        """Nome del parser, salvato in parsed_documents.parser_name."""
+        return type(self).__name__
+
+    # -- passi con un comportamento predefinito -----------------------------
+
+    def fetch(self, url: str) -> str:
+        """
+        Scarica la pagina. Crawl4AI, come chiede la consegna, con fallback HTTP.
+
+        Wikipedia ridefinisce questo metodo: le sue pagine sono renderizzate
+        lato server e aprire un browser headless costerebbe secondi per un
+        risultato identico.
+        """
+        return fetch_html_crawl4ai(url)
+
+    def domain_for(self, url: str) -> str:
+        """Host dell'URL; ripiega sul dominio canonico se l'URL non e' parsabile."""
+        return (urlparse(url).hostname or self.canonical_domain).lower()
+
+    def prepare(self, soup: BeautifulSoup) -> None:
+        """
+        Prepara l'albero prima dell'estrazione. Di base non fa nulla.
+
+        E' il punto in cui ogni sito toglie il proprio rumore, e in cui
+        Basketball-Reference riporta nel DOM le tabelle che il sito nasconde
+        dentro commenti HTML.
+        """
+
+    def extract_title(self, soup: BeautifulSoup) -> str:
+        """Titolo della pagina, dal tag <title>."""
+        return extract_page_title(soup)
+
+    def finalize(self, blocks: list[str]) -> str:
+        """Compone il Markdown finale a partire dai blocchi estratti."""
+        return "\n\n".join(b for b in blocks if b and b.strip()).strip()
+
+    # -- il passo che ogni dominio deve implementare ------------------------
+
+    @abstractmethod
+    def extract_blocks(self, soup: BeautifulSoup, url: str, html: str) -> list[str]:
+        """
+        Blocchi informativi della pagina, gia' in Markdown.
+
+        Il titolo non va incluso: lo antepone 'parse'.
+        """

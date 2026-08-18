@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Errore{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Qualcosa non ha funzionato</h2>
+    <p>{{ error or "Errore non specificato." }}</p>
+    <p class="muted" style="margin-bottom:0">
+        Se il problema riguarda il backend, controlla lo stato dei componenti in
+        <a href="/">home</a>.
+    </p>
+</div>
+{% endblock %}

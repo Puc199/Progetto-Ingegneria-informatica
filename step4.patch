@@ -1,0 +1,1961 @@
+diff --git a/.gitignore b/.gitignore
+index d33c84e..8201094 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -1,40 +1,4 @@
+-.DS_Store
+-
+-# Virtual environments
+-.venv/
+-backend/.venv/
+-venv/
+-env/
+-ENV/
+-**/.venv/
+-**/venv/
+-**/env/
+-**/ENV/
+-
+-# Python cache / bytecode
+ __pycache__/
+-**/__pycache__/
+-*.py[cod]
+ *.pyc
+-*.pyo
+-*.pyd
+-*$py.class
+-
+-# Python / tool metadata
+-.python-version
+-.pytest_cache/
+-.mypy_cache/
+-.ruff_cache/
+-.hypothesis/
+-.coverage
+-.coverage.*
+-.cache
+-
+-# Jupyter
+-.ipynb_checkpoints/
+-
+-# Packaging / build
+-build/
+-dist/
+-*.egg-info/
+-.eggs/
++*.bak
++.env
+diff --git a/backend/Dockerfile b/backend/Dockerfile
+index 50c96b7..d7b26c2 100644
+--- a/backend/Dockerfile
++++ b/backend/Dockerfile
+@@ -2,11 +2,32 @@ FROM python:3.11-slim
+ 
+ WORKDIR /app
+ 
++# Dipendenze di sistema:
++#   build-essential + libmariadb-dev  servono a compilare mariadb-connector,
++#                                     che e' un'estensione C e non una ruota pura
++#   le altre librerie sono quelle di cui Chromium ha bisogno per partire in
++#   modalita' headless, richiesto da Crawl4AI
++RUN apt-get update && apt-get install -y --no-install-recommends \
++        build-essential \
++        libmariadb-dev \
++        pkg-config \
++        wget \
++        ca-certificates \
++    && rm -rf /var/lib/apt/lists/*
++
+ COPY backend/requirements.txt ./requirements.txt
+ RUN pip install --no-cache-dir -r requirements.txt
+ 
++# Scarica Chromium e le sue dipendenze di sistema. Senza questo passaggio
++# Crawl4AI e' installato ma non ha un browser da avviare: ogni download
++# fallirebbe in silenzio ripiegando sul fetch HTTP semplice, perdendo tutto
++# cio' che il sito costruisce in JavaScript.
++RUN playwright install --with-deps chromium
++
+ COPY backend/src ./src
+ COPY domains.json ./domains.json
+-COPY gsdata ./gsdata
++COPY gs_data ./gs_data
++
++EXPOSE 8003
+ 
+-CMD ["uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "8003"]
+\ No newline at end of file
++CMD ["uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "8003"]
+diff --git a/backend/requirements.txt b/backend/requirements.txt
+index 9214f2f..82729c4 100644
+--- a/backend/requirements.txt
++++ b/backend/requirements.txt
+@@ -1,8 +1,9 @@
+-fastapi
+-uvicorn[standard]
+-pydantic
+-requests
+-beautifulsoup4
+-mistune
+-crawl4ai
+-playwright
+\ No newline at end of file
++fastapi
++uvicorn[standard]
++pydantic
++requests
++beautifulsoup4
++mistune
++crawl4ai
++playwright
++mariadb
+diff --git a/backend/src/server.py b/backend/src/server.py
+index 8d1d143..5d8774d 100644
+--- a/backend/src/server.py
++++ b/backend/src/server.py
+@@ -1,15 +1,38 @@
+ from pathlib import Path
+ import json
++import logging
+ 
+ from fastapi import FastAPI, HTTPException
+ 
+ from src.parsers.registry import get_parser
+ from src.schemas import ParsePostRequest, EvaluateRequest
+ from src.services.evaluator import token_level_eval
++from src.services import bootstrap
+ 
+ 
+ app = FastAPI(title="Pipeline di Parsing Web")
+ 
++logging.basicConfig(level=logging.INFO,
++                    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
++logger = logging.getLogger(__name__)
++
++
++@app.on_event("startup")
++def on_startup() -> None:
++    """
++    Inizializzazione automatica del sistema.
++
++    La consegna vieta passaggi intermedi fra "docker compose up --build" e lo
++    script di test: schema, dati e metriche devono essere pronti da soli.
++    Un errore qui non deve impedire l'avvio, altrimenti GET /status non
++    potrebbe nemmeno riportare che il database non risponde.
++    """
++    try:
++        summary = bootstrap.initialize(GSDATA_DIR)
++        logger.info("Inizializzazione completata: %s", summary)
++    except Exception as exc:
++        logger.exception("Inizializzazione fallita: %s", exc)
++
+ 
+ BASE_DIR = Path(__file__).resolve().parents[1]      # /app in Docker, backend/ in locale
+ 
+@@ -26,7 +49,7 @@ def _resolve(name: str) -> Path:
+ 
+ 
+ DOMAINS_FILE = _resolve("domains.json")
+-GSDATA_DIR = _resolve("gsdata")
++GSDATA_DIR = _resolve("gs_data")
+ 
+ 
+ def normalize_domain(domain: str) -> str:
+diff --git a/backend/src/services/bootstrap.py b/backend/src/services/bootstrap.py
+new file mode 100644
+index 0000000..f19123c
+--- /dev/null
++++ b/backend/src/services/bootstrap.py
+@@ -0,0 +1,250 @@
++"""
++Inizializzazione del sistema all'avvio del backend.
++
++La consegna chiede che dopo "docker compose up --build" il sistema sia
++utilizzabile senza nessun passaggio intermedio: il Gold Standard dev'essere
++gia' nel database e /db_stats deve poter leggere valutazioni gia' calcolate.
++Questo modulo e' lo script di inizializzazione che realizza quel requisito.
++
++Divisione del lavoro fra i due tempi di avvio:
++
++  sincrono, prima che l'API accetti richieste
++    connessione al database, caricamento dei JSON del Gold Standard,
++    parsing di ogni entry e calcolo delle metriche. Tutto questo lavora
++    sull'HTML gia' salvato, quindi non tocca la rete ed e' veloce.
++
++  in background, mentre l'API e' gia' online
++    i giudizi dell'LLM. Su CPU una singola valutazione puo' richiedere
++    diversi secondi: farla in sincrono significherebbe ritardare l'avvio di
++    minuti e rischiare che lo script di test parta prima che il backend
++    risponda. Il thread riprende da dove era arrivato a ogni riavvio, quindi
++    un riavvio non ricomincia da capo.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++import threading
++from pathlib import Path
++from typing import Iterable, Optional
++
++from src.parsers.registry import get_parser
++from src.services import repository
++from src.services.database import init_pool
++from src.services.evaluator import token_level_eval
++from src.services.judge import OLLAMA_MODEL, evaluate_judge, judge_available
++
++logger = logging.getLogger(__name__)
++
++JUDGE_ON_INIT = os.getenv("JUDGE_ON_INIT", "true").lower() in ("1", "true", "yes")
++
++# Quanti secondi attendere al massimo che Ollama abbia finito di scaricare il
++# modello, prima di rinunciare al precalcolo dei giudizi.
++JUDGE_WAIT_SECONDS = int(os.getenv("JUDGE_WAIT_SECONDS", "600"))
++
++
++def _iter_gold_standard_files(gs_dir: Path) -> Iterable[Path]:
++    """File JSON del Gold Standard presenti nella cartella."""
++    if not gs_dir.is_dir():
++        logger.error("Cartella dei Gold Standard non trovata: %s", gs_dir)
++        return []
++    return sorted(gs_dir.glob("*_gs.json"))
++
++
++def load_gold_standard_files(gs_dir: Path) -> int:
++    """
++    Carica nel database tutti i Gold Standard presenti su disco.
++
++    Le entry senza url o senza html_text vengono scartate con un avviso: una
++    risorsa web senza HTML non serve a niente e farebbe fallire il parsing in
++    fase di valutazione.
++
++    Returns:
++        Numero di entry caricate.
++    """
++    total = 0
++
++    for path in _iter_gold_standard_files(gs_dir):
++        try:
++            data = json.loads(path.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError) as exc:
++            logger.error("Salto %s: %s", path.name, exc)
++            continue
++
++        if not isinstance(data, list):
++            logger.error("Salto %s: il file non contiene una lista di entry", path.name)
++            continue
++
++        valid = []
++        for entry in data:
++            if not isinstance(entry, dict):
++                continue
++            if not entry.get("url") or not entry.get("html_text"):
++                logger.warning("Salto un'entry di %s priva di url o html_text", path.name)
++                continue
++            valid.append(entry)
++
++        if valid:
++            repository.bulk_insert_gold_standard(valid)
++            total += len(valid)
++            logger.info("Caricate %d entry da %s", len(valid), path.name)
++
++    return total
++
++
++def precompute_metrics() -> int:
++    """
++    Esegue il parsing di ogni entry del Gold Standard e salva le metriche.
++
++    Si lavora sempre sull'HTML statico del database: e' quello che chiede la
++    consegna per l'evaluation, ed e' anche l'unico modo di avere numeri
++    confrontabili nel tempo su siti che cambiano ogni giorno.
++
++    Returns:
++        Numero di entry valutate.
++    """
++    done = 0
++
++    for domain in _domains_in_db():
++        for entry in repository.list_gold_standard_by_domain(domain):
++            url = entry["url"]
++            parser, _ = get_parser(url)
++            if parser is None:
++                logger.warning("Nessun parser per %s, salto", url)
++                continue
++
++            try:
++                result = parser(url, html_text=entry["html_text"])
++            except Exception as exc:
++                logger.error("Parsing fallito su %s: %s", url, exc)
++                continue
++
++            parsed_text = result.get("parsed_text", "")
++            repository.save_parsed_document(url, parser.__name__, parsed_text)
++
++            scores = token_level_eval(parsed_text, entry.get("gold_text", ""))
++            repository.save_evaluation(
++                url,
++                repository.TOKEN_LEVEL,
++                precision=scores["precision"],
++                recall=scores["recall"],
++                f1=scores["f1"],
++            )
++            done += 1
++
++    return done
++
++
++def _domains_in_db() -> list[str]:
++    """Domini effettivamente presenti in web_resources."""
++    stats = repository.database_stats()
++    return list(stats["web_resources"].keys())
++
++
++def _wait_for_judge() -> bool:
++    """
++    Attende che Ollama abbia il modello pronto.
++
++    Al primo avvio il container sta scaricando qualche gigabyte: senza questa
++    attesa il precalcolo partirebbe subito e fallirebbe su ogni entry.
++    """
++    import time
++
++    waited = 0
++    while waited < JUDGE_WAIT_SECONDS:
++        if judge_available():
++            return True
++        time.sleep(10)
++        waited += 10
++
++    logger.warning("Ollama non pronto dopo %d secondi: salto il precalcolo dei giudizi",
++                   JUDGE_WAIT_SECONDS)
++    return False
++
++
++def precompute_judgements() -> None:
++    """
++    Calcola i giudizi mancanti sul Gold Standard, una entry alla volta.
++
++    Pensata per girare in un thread separato: l'API e' gia' online mentre
++    questo lavora. Ogni giudizio viene salvato subito, cosi' /db_stats mostra
++    valori via via piu' completi invece di restare vuota fino alla fine.
++    """
++    if not _wait_for_judge():
++        return
++
++    pending = repository.urls_without_judgement(OLLAMA_MODEL)
++    if not pending:
++        logger.info("Giudizi gia' presenti per tutte le entry del Gold Standard")
++        return
++
++    logger.info("Precalcolo dei giudizi su %d entry con il modello %s",
++                len(pending), OLLAMA_MODEL)
++
++    for index, row in enumerate(pending, start=1):
++        url = row["url"]
++        parser, _ = get_parser(url)
++        if parser is None:
++            continue
++
++        try:
++            parsed_text = parser(url, html_text=row["html_text"]).get("parsed_text", "")
++        except Exception as exc:
++            logger.error("Parsing fallito su %s durante il precalcolo: %s", url, exc)
++            continue
++
++        verdict = evaluate_judge(parsed_text, row.get("gold_text", ""))
++        repository.save_judgement(
++            url,
++            verdict["model_name"],
++            verdict["judge_score"],
++            verdict["judge_feedback"],
++            verdict["parse_ok"],
++        )
++
++        if index % 5 == 0 or index == len(pending):
++            logger.info("Giudizi calcolati: %d/%d", index, len(pending))
++
++    logger.info("Precalcolo dei giudizi completato")
++
++
++def initialize(gs_dir: Path, force_reload: bool = False) -> dict:
++    """
++    Inizializza il sistema. Chiamata una volta all'avvio del backend.
++
++    Args:
++        gs_dir: cartella con i JSON del Gold Standard.
++        force_reload: ricarica i JSON anche se il database e' gia' popolato.
++
++    Returns:
++        Riepilogo di cio' che e' stato fatto, utile nei log di avvio.
++    """
++    init_pool()
++
++    already_loaded = repository.count_web_resources()
++    loaded = 0
++
++    if already_loaded == 0 or force_reload:
++        loaded = load_gold_standard_files(gs_dir)
++        logger.info("Gold Standard caricato: %d entry", loaded)
++    else:
++        logger.info("Database gia' popolato con %d risorse web, salto il caricamento",
++                    already_loaded)
++
++    evaluated = precompute_metrics()
++    logger.info("Metriche precalcolate su %d entry", evaluated)
++
++    if JUDGE_ON_INIT:
++        thread = threading.Thread(target=precompute_judgements,
++                                  name="precompute-judgements",
++                                  daemon=True)
++        thread.start()
++
++    return {
++        "gold_standard_loaded": loaded,
++        "already_present": already_loaded,
++        "metrics_computed": evaluated,
++        "judge_scheduled": JUDGE_ON_INIT,
++    }
+diff --git a/backend/src/services/database.py b/backend/src/services/database.py
+new file mode 100644
+index 0000000..67e243f
+--- /dev/null
++++ b/backend/src/services/database.py
+@@ -0,0 +1,237 @@
++"""
++Accesso a MariaDB con MariaDB Connector/Python.
++
++Questo modulo si occupa solo di connettersi e di eseguire query: le query
++specifiche del progetto stanno in repository.py. La separazione serve a
++tenere in un posto solo le due cose che vanno fatte bene una volta e poi
++riusate ovunque: la gestione del pool di connessioni e l'uso delle query
++parametrizzate.
++
++Query parametrizzate, sempre
++----------------------------
++Ogni funzione qui accetta la query con i segnaposto '?' e i valori come
++tupla separata. Il driver sostituisce i segnaposto trattando i valori come
++dati puri, mai come codice SQL. Costruire le query con le f-string
++esporrebbe il sistema alla SQL injection: gli URL arrivano dal corpo delle
++richieste HTTP, quindi sono input non fidato a tutti gli effetti.
++"""
++
++from __future__ import annotations
++
++import logging
++import os
++import time
++from contextlib import contextmanager
++from typing import Any, Iterator, Optional, Sequence
++
++import mariadb
++
++logger = logging.getLogger(__name__)
++
++DB_HOST = os.getenv("DB_HOST", "mariadb")
++DB_PORT = int(os.getenv("DB_PORT", "3306"))
++DB_USER = os.getenv("DB_USER", "lab_user")
++DB_PASSWORD = os.getenv("DB_PASSWORD", "lab_password")
++DB_NAME = os.getenv("DB_NAME", "parsing_db")
++
++POOL_NAME = "lab_pool"
++POOL_SIZE = 5
++
++_pool: Optional[mariadb.ConnectionPool] = None
++
++
++class DatabaseError(RuntimeError):
++    """Errore di accesso al database, gia' tradotto per i livelli superiori."""
++
++
++def _pool_config() -> dict:
++    return {
++        "host": DB_HOST,
++        "port": DB_PORT,
++        "user": DB_USER,
++        "password": DB_PASSWORD,
++        "database": DB_NAME,
++        "autocommit": False,
++    }
++
++
++def init_pool(retries: int = 30, delay: float = 2.0) -> None:
++    """
++    Crea il pool di connessioni, riprovando finche' MariaDB non e' pronto.
++
++    Il compose usa gia' un healthcheck, ma il retry resta: se il database
++    viene riavviato mentre il backend e' in piedi, il primo tentativo
++    fallisce e senza questo il servizio resterebbe rotto.
++
++    Raises:
++        DatabaseError: se il database non risponde entro i tentativi previsti.
++    """
++    global _pool
++
++    if _pool is not None:
++        return
++
++    last_error: Optional[Exception] = None
++    for attempt in range(1, retries + 1):
++        try:
++            _pool = mariadb.ConnectionPool(pool_name=POOL_NAME,
++                                           pool_size=POOL_SIZE,
++                                           **_pool_config())
++            logger.info("Connesso a MariaDB su %s:%s/%s", DB_HOST, DB_PORT, DB_NAME)
++            return
++        except mariadb.Error as exc:
++            last_error = exc
++            logger.warning("MariaDB non ancora pronto (tentativo %d/%d): %s",
++                           attempt, retries, exc)
++            time.sleep(delay)
++
++    raise DatabaseError(f"Impossibile connettersi a MariaDB: {last_error}")
++
++
++@contextmanager
++def get_connection() -> Iterator[mariadb.Connection]:
++    """
++    Fornisce una connessione dal pool e la restituisce a fine blocco.
++
++    In caso di eccezione la transazione viene annullata: senza rollback la
++    connessione tornerebbe nel pool con una transazione aperta e il problema
++    si manifesterebbe sulla richiesta successiva, altrove.
++    """
++    if _pool is None:
++        init_pool()
++
++    connection = None
++    try:
++        connection = _pool.get_connection()
++        yield connection
++    except mariadb.Error as exc:
++        if connection is not None:
++            try:
++                connection.rollback()
++            except mariadb.Error:
++                pass
++        raise DatabaseError(str(exc)) from exc
++    finally:
++        if connection is not None:
++            connection.close()      # con il pool, close() restituisce la connessione
++
++
++def fetch_all(query: str, params: Sequence[Any] = ()) -> list[dict]:
++    """Esegue una SELECT e restituisce le righe come dizionari."""
++    with get_connection() as connection:
++        cursor = connection.cursor(dictionary=True)
++        try:
++            cursor.execute(query, tuple(params))
++            return list(cursor.fetchall())
++        finally:
++            cursor.close()
++
++
++def fetch_one(query: str, params: Sequence[Any] = ()) -> Optional[dict]:
++    """Esegue una SELECT e restituisce la prima riga, o None."""
++    rows = fetch_all(query, params)
++    return rows[0] if rows else None
++
++
++def execute(query: str, params: Sequence[Any] = ()) -> int:
++    """
++    Esegue una INSERT, UPDATE o DELETE e rende la modifica permanente.
++
++    Returns:
++        Numero di righe interessate.
++    """
++    with get_connection() as connection:
++        cursor = connection.cursor()
++        try:
++            cursor.execute(query, tuple(params))
++            connection.commit()
++            return cursor.rowcount
++        finally:
++            cursor.close()
++
++
++def execute_many(query: str, rows: Sequence[Sequence[Any]]) -> int:
++    """
++    Esegue la stessa query su piu' righe in una sola transazione.
++
++    Usato dal caricamento iniziale: un commit per ogni entry del Gold
++    Standard renderebbe l'avvio inutilmente lento.
++    """
++    if not rows:
++        return 0
++
++    with get_connection() as connection:
++        cursor = connection.cursor()
++        try:
++            cursor.executemany(query, [tuple(row) for row in rows])
++            connection.commit()
++            return cursor.rowcount
++        finally:
++            cursor.close()
++
++
++def is_available() -> bool:
++    """
++    Vero se il database risponde. Usato da GET /status, che non deve
++    sollevare eccezioni ma riportare lo stato dentro il JSON.
++    """
++    try:
++        with get_connection() as connection:
++            cursor = connection.cursor()
++            try:
++                cursor.execute("SELECT 1")
++                cursor.fetchall()
++                return True
++            finally:
++                cursor.close()
++    except Exception:
++        return False
++
++
++def table_schema() -> dict[str, dict[str, str]]:
++    """
++    Schema del database nel formato richiesto da GET /db_schema.
++
++    Legge information_schema invece di ricopiare a mano lo schema: cosi' la
++    risposta non puo' divergere dal database reale quando lo schema cambia.
++    """
++    columns = fetch_all(
++        """
++        SELECT TABLE_NAME, COLUMN_NAME, COLUMN_TYPE, COLUMN_KEY
++        FROM information_schema.COLUMNS
++        WHERE TABLE_SCHEMA = ?
++        ORDER BY TABLE_NAME, ORDINAL_POSITION
++        """,
++        (DB_NAME,),
++    )
++
++    foreign_keys = fetch_all(
++        """
++        SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
++        FROM information_schema.KEY_COLUMN_USAGE
++        WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL
++        """,
++        (DB_NAME,),
++    )
++
++    fk_map = {
++        (row["TABLE_NAME"], row["COLUMN_NAME"]):
++            f"FK({row['REFERENCED_TABLE_NAME']}.{row['REFERENCED_COLUMN_NAME']})"
++        for row in foreign_keys
++    }
++
++    schema: dict[str, dict[str, str]] = {}
++    for row in columns:
++        table = row["TABLE_NAME"]
++        column = row["COLUMN_NAME"]
++
++        parts = [row["COLUMN_TYPE"]]
++        if row["COLUMN_KEY"] == "PRI":
++            parts.append("PK")
++        reference = fk_map.get((table, column))
++        if reference:
++            parts.append(reference)
++
++        schema.setdefault(table, {})[column] = ", ".join(parts)
++
++    return schema
+diff --git a/backend/src/services/judge.py b/backend/src/services/judge.py
+new file mode 100644
+index 0000000..1880983
+--- /dev/null
++++ b/backend/src/services/judge.py
+@@ -0,0 +1,246 @@
++"""
++LLM-as-Judge: valutazione qualitativa del parsing tramite Ollama.
++
++Il modello riceve il testo prodotto dal parser e il testo di riferimento e
++restituisce un punteggio da 1 a 5 con un feedback in linguaggio naturale.
++
++Scelte di progetto
++------------------
++1. Responsabilita' separate fra i due messaggi, come visto a lezione: il
++   ruolo, i criteri e il formato stanno nel messaggio 'system'; nel messaggio
++   'user' ci sono solo i due testi da confrontare. Un system prompt fisso e'
++   anche piu' facile da mettere a punto, perche' cambia una cosa sola.
++
++2. Formato JSON imposto a monte. Ollama accetta "format": "json", che vincola
++   la generazione a produrre JSON sintatticamente valido. E' molto piu'
++   efficace che chiederlo a parole a un modello da 3 miliardi di parametri.
++   Il fallback resta comunque implementato: e' obbligatorio da consegna, e
++   "JSON valido" non garantisce "JSON con i campi giusti".
++
++3. Temperatura bassa. Qui serve un giudizio ripetibile: la stessa coppia di
++   testi deve dare lo stesso punteggio a due chiamate diverse. La creativita'
++   e' esattamente cio' che non si vuole.
++
++4. Testi troncati. La consegna lo consente esplicitamente, e su CPU e' la
++   differenza fra una valutazione che finisce e una che va in timeout. Il
++   troncamento avviene sui primi caratteri: l'inizio di una pagina e' dove si
++   concentrano sia il contenuto informativo sia il boilerplate residuo, cioe'
++   proprio cio' che il judge deve saper distinguere.
++
++5. Il Markdown viene rimosso prima dell'invio. Il judge deve valutare il
++   contenuto estratto, non la formattazione: lasciarlo penalizzerebbe il
++   parser per aver fatto quello che la consegna gli chiede.
++"""
++
++from __future__ import annotations
++
++import json
++import logging
++import os
++import re
++from typing import Any, Optional
++
++import requests
++
++from src.services.markdown_utils import remove_markdown
++
++logger = logging.getLogger(__name__)
++
++OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
++OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
++JUDGE_MAX_CHARS = int(os.getenv("JUDGE_MAX_CHARS", "2000"))
++JUDGE_TIMEOUT = int(os.getenv("JUDGE_TIMEOUT", "180"))
++
++MIN_SCORE = 1
++MAX_SCORE = 5
++
++SYSTEM_PROMPT = """You are a strict evaluator of web page text extraction.
++
++You compare TEXT_EXTRACTED, produced by an automatic parser, against
++GOLD_TEXT, the reference text a human copied by hand from the same page.
++
++Judge only the informative content. Ignore differences in line breaks,
++spacing and ordering of sections.
++
++Penalise:
++- boilerplate left in TEXT_EXTRACTED (navigation menus, cookie banners,
++  advertisements, footers, related links)
++- informative content present in GOLD_TEXT but missing from TEXT_EXTRACTED
++- text that is cut off in the middle of a sentence
++- repeated content
++
++Scoring scale:
++5 = the informative content matches, no boilerplate
++4 = minor omissions or small amounts of noise
++3 = clearly usable, but with visible omissions or leftover boilerplate
++2 = a large part of the content is missing or the noise dominates
++1 = the extraction is unusable
++
++Reply with a single JSON object, nothing else:
++{"score": <integer 1-5>, "feedback": "<one short sentence>"}"""
++
++USER_TEMPLATE = """GOLD_TEXT:
++{gold_text}
++
++TEXT_EXTRACTED:
++{parsed_text}"""
++
++# Cattura un oggetto JSON dentro una risposta che contiene anche altro
++# (capita con i modelli che premettono una frase di cortesia).
++JSON_OBJECT_RE = re.compile(r"\{.*\}", re.DOTALL)
++FIRST_SCORE_RE = re.compile(r"\b([1-5])\b")
++
++
++def _truncate(text: str) -> str:
++    """Rimuove il Markdown e taglia il testo alla lunghezza massima."""
++    plain = remove_markdown(text or "").strip()
++    if len(plain) <= JUDGE_MAX_CHARS:
++        return plain
++    return plain[:JUDGE_MAX_CHARS] + " [...]"
++
++
++def _clamp_score(value: Any) -> Optional[int]:
++    """Converte il punteggio in un intero fra 1 e 5, o None se non e' un numero."""
++    try:
++        score = int(round(float(value)))
++    except (TypeError, ValueError):
++        return None
++    return max(MIN_SCORE, min(MAX_SCORE, score))
++
++
++def _fallback(feedback: str, raw: str = "") -> dict:
++    """
++    Risposta usata quando il modello non produce un giudizio leggibile.
++
++    Il punteggio e' il minimo, e parse_ok=False segnala che il valore non e'
++    un giudizio ma una mancata risposta. Tenere traccia della differenza
++    conta: la percentuale di risposte valide e' uno dei numeri che motivano
++    la scelta del modello nel report.
++    """
++    if raw:
++        logger.warning("Risposta del judge non interpretabile: %.300s", raw)
++    return {
++        "model_name": OLLAMA_MODEL,
++        "judge_score": MIN_SCORE,
++        "judge_feedback": feedback,
++        "parse_ok": False,
++    }
++
++
++def _parse_response(content: str) -> dict:
++    """
++    Estrae punteggio e feedback dalla risposta del modello.
++
++    Tre tentativi in ordine di affidabilita' decrescente: JSON completo,
++    oggetto JSON annegato in altro testo, primo numero fra 1 e 5 nel testo.
++    """
++    content = (content or "").strip()
++    if not content:
++        return _fallback("Il modello non ha restituito alcuna risposta.")
++
++    payload: Optional[dict] = None
++    try:
++        parsed = json.loads(content)
++        if isinstance(parsed, dict):
++            payload = parsed
++    except json.JSONDecodeError:
++        match = JSON_OBJECT_RE.search(content)
++        if match:
++            try:
++                parsed = json.loads(match.group(0))
++                if isinstance(parsed, dict):
++                    payload = parsed
++            except json.JSONDecodeError:
++                payload = None
++
++    if payload is not None:
++        score = _clamp_score(payload.get("score", payload.get("judge_score")))
++        if score is not None:
++            feedback = payload.get("feedback") or payload.get("judge_feedback") or ""
++            return {
++                "model_name": OLLAMA_MODEL,
++                "judge_score": score,
++                "judge_feedback": str(feedback).strip() or "Nessun feedback fornito dal modello.",
++                "parse_ok": True,
++            }
++
++    # Ultimo tentativo: il modello ha risposto a parole ma il numero c'e'.
++    match = FIRST_SCORE_RE.search(content)
++    if match:
++        return {
++            "model_name": OLLAMA_MODEL,
++            "judge_score": int(match.group(1)),
++            "judge_feedback": content[:300],
++            "parse_ok": False,
++        }
++
++    return _fallback("Il modello non ha rispettato il formato JSON richiesto.", content)
++
++
++def judge_available() -> bool:
++    """
++    Vero se Ollama risponde e ha il modello configurato.
++
++    Usato da GET /status, che deve riportare lo stato dei componenti senza
++    sollevare eccezioni.
++    """
++    try:
++        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=5)
++        response.raise_for_status()
++        models = [m.get("name", "") for m in response.json().get("models", [])]
++        return any(name.startswith(OLLAMA_MODEL.split(":")[0]) for name in models)
++    except Exception:
++        return False
++
++
++def evaluate_judge(parsed_text: str, gold_text: str,
++                   model_name: Optional[str] = None) -> dict:
++    """
++    Chiede all'LLM un giudizio sulla qualita' del testo estratto.
++
++    Args:
++        parsed_text: testo prodotto dal parser, eventualmente in Markdown.
++        gold_text: testo di riferimento del Gold Standard.
++        model_name: modello da usare; se assente si usa quello configurato.
++                    Serve al confronto fra modelli in fase di scelta.
++
++    Returns:
++        Dizionario con model_name, judge_score (intero 1-5), judge_feedback
++        e parse_ok. Non solleva mai: un judge che non risponde e' un caso
++        previsto, non un errore del sistema.
++    """
++    model = model_name or OLLAMA_MODEL
++
++    payload = {
++        "model": model,
++        "messages": [
++            {"role": "system", "content": SYSTEM_PROMPT},
++            {"role": "user", "content": USER_TEMPLATE.format(
++                gold_text=_truncate(gold_text),
++                parsed_text=_truncate(parsed_text),
++            )},
++        ],
++        "stream": False,
++        "format": "json",
++        "options": {
++            "temperature": 0.1,
++            "num_predict": 200,
++        },
++    }
++
++    try:
++        response = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=JUDGE_TIMEOUT)
++        response.raise_for_status()
++        content = response.json().get("message", {}).get("content", "")
++    except requests.Timeout:
++        result = _fallback(f"Il modello {model} non ha risposto entro {JUDGE_TIMEOUT} secondi.")
++        result["model_name"] = model
++        return result
++    except Exception as exc:
++        result = _fallback(f"Ollama non raggiungibile: {exc}")
++        result["model_name"] = model
++        return result
++
++    result = _parse_response(content)
++    result["model_name"] = model
++    return result
+diff --git a/backend/src/services/repository.py b/backend/src/services/repository.py
+new file mode 100644
+index 0000000..149e30d
+--- /dev/null
++++ b/backend/src/services/repository.py
+@@ -0,0 +1,363 @@
++"""
++Query del progetto sul database.
++
++Tutte le query stanno qui e nessuna altrove: server.py chiama funzioni con
++nomi parlanti e non conosce lo schema. Cosi' una modifica alle tabelle si
++riflette in un solo file, e il livello REST resta leggibile.
++
++Ogni valore che arriva da fuori passa dai segnaposto '?', mai
++dall'interpolazione di stringa (vedi la nota in database.py).
++"""
++
++from __future__ import annotations
++
++from typing import Any, Optional
++
++from src.services.database import execute, execute_many, fetch_all, fetch_one
++
++# Nome della metrica obbligatoria, usato come chiave in evaluations.
++TOKEN_LEVEL = "token_level_eval"
++
++
++# ---------------------------------------------------------------------------
++# web_resources
++# ---------------------------------------------------------------------------
++
++def upsert_web_resource(url: str, domain: str, title: str, html_text: str) -> None:
++    """
++    Inserisce una risorsa web, o ne aggiorna il contenuto se l'URL esiste.
++
++    L'upsert serve a POST /add_web_resource: la consegna dice che i test
++    automatici possono alterare questa tabella, quindi reinserire lo stesso
++    URL deve aggiornare l'HTML e non fallire con un errore di chiave duplicata.
++    """
++    execute(
++        """
++        INSERT INTO web_resources (url, domain, title, html_text)
++        VALUES (?, ?, ?, ?)
++        ON DUPLICATE KEY UPDATE
++            domain = VALUES(domain),
++            title = VALUES(title),
++            html_text = VALUES(html_text)
++        """,
++        (url, domain, title, html_text),
++    )
++
++
++def get_web_resource(url: str) -> Optional[dict]:
++    """Risorsa web con quell'URL, o None."""
++    return fetch_one(
++        "SELECT url, domain, title, html_text, created_at FROM web_resources WHERE url = ?",
++        (url,),
++    )
++
++
++def web_resource_exists(url: str) -> bool:
++    """Vero se l'URL e' gia' in web_resources."""
++    return fetch_one("SELECT 1 AS present FROM web_resources WHERE url = ?", (url,)) is not None
++
++
++def delete_web_resource(url: str) -> int:
++    """
++    Cancella una risorsa web.
++
++    Il gold standard collegato sparisce da solo: la foreign key e' definita
++    ON DELETE CASCADE, quindi l'integrita' referenziale la garantisce il
++    database e non il codice applicativo.
++    """
++    return execute("DELETE FROM web_resources WHERE url = ?", (url,))
++
++
++# ---------------------------------------------------------------------------
++# gold_standard
++# ---------------------------------------------------------------------------
++
++def upsert_gold_standard(url: str, gold_text: str) -> None:
++    """Inserisce o aggiorna il testo di riferimento di un URL."""
++    execute(
++        """
++        INSERT INTO gold_standard (url, gold_text)
++        VALUES (?, ?)
++        ON DUPLICATE KEY UPDATE gold_text = VALUES(gold_text)
++        """,
++        (url, gold_text),
++    )
++
++
++def get_gold_standard_entry(url: str) -> Optional[dict]:
++    """
++    Entry completa del Gold Standard per un URL.
++
++    La JOIN ricompone il formato richiesto da GET /gold_standard: url,
++    domain, title e html_text stanno in web_resources, gold_text in
++    gold_standard.
++    """
++    return fetch_one(
++        """
++        SELECT w.url, w.domain, w.title, w.html_text, g.gold_text
++        FROM gold_standard AS g
++        JOIN web_resources AS w ON w.url = g.url
++        WHERE g.url = ?
++        """,
++        (url,),
++    )
++
++
++def list_gold_standard_by_domain(domain: str) -> list[dict]:
++    """Tutte le entry del Gold Standard di un dominio."""
++    return fetch_all(
++        """
++        SELECT w.url, w.domain, w.title, w.html_text, g.gold_text
++        FROM gold_standard AS g
++        JOIN web_resources AS w ON w.url = g.url
++        WHERE w.domain = ?
++        ORDER BY w.url
++        """,
++        (domain,),
++    )
++
++
++def list_gold_standard_urls(domain: str) -> list[str]:
++    """Solo gli URL del Gold Standard di un dominio, senza l'HTML."""
++    rows = fetch_all(
++        """
++        SELECT w.url
++        FROM gold_standard AS g
++        JOIN web_resources AS w ON w.url = g.url
++        WHERE w.domain = ?
++        ORDER BY w.url
++        """,
++        (domain,),
++    )
++    return [row["url"] for row in rows]
++
++
++def gold_standard_exists(url: str) -> bool:
++    """Vero se l'URL ha gia' un testo di riferimento."""
++    return fetch_one("SELECT 1 AS present FROM gold_standard WHERE url = ?", (url,)) is not None
++
++
++def delete_gold_standard(url: str) -> int:
++    """
++    Cancella solo il testo di riferimento.
++
++    La risorsa web resta: e' la differenza fra DELETE /gold_standard e
++    DELETE /web_resource richiesta dalla consegna.
++    """
++    return execute("DELETE FROM gold_standard WHERE url = ?", (url,))
++
++
++def bulk_insert_gold_standard(entries: list[dict]) -> int:
++    """
++    Caricamento iniziale: inserisce risorse web e testi di riferimento.
++
++    Le due tabelle si popolano in due passaggi perche' la foreign key impone
++    che la risorsa web esista prima del suo gold standard.
++    """
++    resources = [
++        (e["url"], e["domain"], e.get("title", ""), e.get("html_text", ""))
++        for e in entries
++    ]
++    execute_many(
++        """
++        INSERT INTO web_resources (url, domain, title, html_text)
++        VALUES (?, ?, ?, ?)
++        ON DUPLICATE KEY UPDATE
++            domain = VALUES(domain),
++            title = VALUES(title),
++            html_text = VALUES(html_text)
++        """,
++        resources,
++    )
++
++    golds = [(e["url"], e.get("gold_text", "")) for e in entries if e.get("gold_text")]
++    execute_many(
++        """
++        INSERT INTO gold_standard (url, gold_text)
++        VALUES (?, ?)
++        ON DUPLICATE KEY UPDATE gold_text = VALUES(gold_text)
++        """,
++        golds,
++    )
++
++    return len(resources)
++
++
++def count_web_resources() -> int:
++    """Numero totale di risorse web, per capire se il DB e' gia' popolato."""
++    row = fetch_one("SELECT COUNT(*) AS n FROM web_resources")
++    return int(row["n"]) if row else 0
++
++
++# ---------------------------------------------------------------------------
++# parsed_documents, evaluations, judgements
++# ---------------------------------------------------------------------------
++
++def save_parsed_document(url: str, parser_name: str, parsed_text: str) -> None:
++    """Salva l'output del parser per una risorsa."""
++    execute(
++        """
++        INSERT INTO parsed_documents (url, parser_name, parsed_text)
++        VALUES (?, ?, ?)
++        ON DUPLICATE KEY UPDATE
++            parser_name = VALUES(parser_name),
++            parsed_text = VALUES(parsed_text)
++        """,
++        (url, parser_name, parsed_text),
++    )
++
++
++def save_evaluation(url: str, metric_name: str,
++                    precision: Optional[float] = None,
++                    recall: Optional[float] = None,
++                    f1: Optional[float] = None,
++                    score: Optional[float] = None) -> None:
++    """
++    Salva il risultato di una metrica su una pagina.
++
++    Una metrica nuova non richiede modifiche allo schema: cambia solo il
++    valore di metric_name.
++    """
++    execute(
++        """
++        INSERT INTO evaluations (url, metric_name, precision_v, recall_v, f1_v, score_v)
++        VALUES (?, ?, ?, ?, ?, ?)
++        ON DUPLICATE KEY UPDATE
++            precision_v = VALUES(precision_v),
++            recall_v = VALUES(recall_v),
++            f1_v = VALUES(f1_v),
++            score_v = VALUES(score_v)
++        """,
++        (url, metric_name, precision, recall, f1, score),
++    )
++
++
++def save_judgement(url: str, model_name: str, judge_score: int,
++                   judge_feedback: str, parse_ok: bool = True) -> None:
++    """Salva il giudizio dell'LLM su una pagina, per uno specifico modello."""
++    execute(
++        """
++        INSERT INTO judgements (url, model_name, judge_score, judge_feedback, parse_ok)
++        VALUES (?, ?, ?, ?, ?)
++        ON DUPLICATE KEY UPDATE
++            judge_score = VALUES(judge_score),
++            judge_feedback = VALUES(judge_feedback),
++            parse_ok = VALUES(parse_ok)
++        """,
++        (url, model_name, judge_score, judge_feedback, parse_ok),
++    )
++
++
++def urls_without_judgement(model_name: str) -> list[dict]:
++    """
++    Pagine del Gold Standard non ancora giudicate da quel modello.
++
++    Serve al precalcolo in background: se il backend viene riavviato riprende
++    da dove era arrivato invece di rifare tutto.
++    """
++    return fetch_all(
++        """
++        SELECT w.url, w.domain, w.html_text, g.gold_text
++        FROM gold_standard AS g
++        JOIN web_resources AS w ON w.url = g.url
++        LEFT JOIN judgements AS j ON j.url = g.url AND j.model_name = ?
++        WHERE j.url IS NULL
++        ORDER BY w.domain, w.url
++        """,
++        (model_name,),
++    )
++
++
++# ---------------------------------------------------------------------------
++# statistiche aggregate
++# ---------------------------------------------------------------------------
++
++def _counts_by_domain(query: str) -> dict[str, int]:
++    return {row["domain"]: int(row["n"]) for row in fetch_all(query)}
++
++
++def database_stats() -> dict[str, Any]:
++    """
++    Statistiche aggregate per dominio, nel formato di GET /db_stats.
++
++    Legge solo valori gia' calcolati e salvati: nessun parsing e nessuna
++    chiamata all'LLM, come richiede la specifica.
++    """
++    web_resources = _counts_by_domain(
++        "SELECT domain, COUNT(*) AS n FROM web_resources GROUP BY domain"
++    )
++    gold_standard = _counts_by_domain(
++        """
++        SELECT w.domain AS domain, COUNT(*) AS n
++        FROM gold_standard AS g
++        JOIN web_resources AS w ON w.url = g.url
++        GROUP BY w.domain
++        """
++    )
++
++    metric_rows = fetch_all(
++        """
++        SELECT w.domain      AS domain,
++               e.metric_name AS metric_name,
++               AVG(e.precision_v) AS precision_v,
++               AVG(e.recall_v)    AS recall_v,
++               AVG(e.f1_v)        AS f1_v,
++               AVG(e.score_v)     AS score_v
++        FROM evaluations AS e
++        JOIN web_resources AS w ON w.url = e.url
++        GROUP BY w.domain, e.metric_name
++        """
++    )
++
++    avg_eval: dict[str, dict[str, dict[str, float]]] = {}
++    for row in metric_rows:
++        values: dict[str, float] = {}
++        for source, target in (("precision_v", "precision"),
++                               ("recall_v", "recall"),
++                               ("f1_v", "f1"),
++                               ("score_v", "score")):
++            if row[source] is not None:
++                values[target] = round(float(row[source]), 4)
++        if values:
++            avg_eval.setdefault(row["domain"], {})[row["metric_name"]] = values
++
++    judge_rows = fetch_all(
++        """
++        SELECT w.domain AS domain,
++               AVG(j.judge_score) AS judge_score,
++               COUNT(*)           AS judged,
++               SUM(j.parse_ok)    AS parsed_ok
++        FROM judgements AS j
++        JOIN web_resources AS w ON w.url = j.url
++        GROUP BY w.domain
++        """
++    )
++
++    avg_eval_judge = {
++        row["domain"]: {
++            "judge_score": round(float(row["judge_score"]), 4) if row["judge_score"] is not None else 0.0,
++            "judged_entries": int(row["judged"]),
++            # Quota di risposte in cui il modello ha rispettato il formato
++            # JSON: dice quanto ci si puo' fidare della media qui sopra.
++            "valid_json_ratio": round(float(row["parsed_ok"]) / int(row["judged"]), 4)
++            if row["judged"] else 0.0,
++        }
++        for row in judge_rows
++    }
++
++    # Ogni dominio presente nel DB compare in tutte le sezioni, anche quando
++    # non ha ancora valutazioni: la specifica chiede che le metriche
++    # obbligatorie e il judge_score siano sempre riportati.
++    for domain in web_resources:
++        avg_eval.setdefault(domain, {})
++        avg_eval[domain].setdefault(TOKEN_LEVEL, {"precision": 0.0, "recall": 0.0, "f1": 0.0})
++        avg_eval_judge.setdefault(domain, {"judge_score": 0.0, "judged_entries": 0,
++                                           "valid_json_ratio": 0.0})
++        gold_standard.setdefault(domain, 0)
++
++    return {
++        "web_resources": web_resources,
++        "gold_standard": gold_standard,
++        "avg_eval": avg_eval,
++        "avg_eval_judge": avg_eval_judge,
++    }
+diff --git a/backend/tools/benchmark_judge.py b/backend/tools/benchmark_judge.py
+new file mode 100644
+index 0000000..5295fd0
+--- /dev/null
++++ b/backend/tools/benchmark_judge.py
+@@ -0,0 +1,305 @@
++"""
++Confronto fra i modelli candidati per il ruolo di judge.
++
++La consegna chiede di provare tutti e cinque i modelli ammessi e di motivare
++nel report la scelta di quello definitivo. Questo script produce i numeri su
++cui basare quella scelta, invece di deciderla a intuito.
++
++Per ogni modello e per ogni pagina del Gold Standard misura:
++
++  judge_score        il voto dato
++  valid_json         se la risposta rispettava il formato richiesto
++  secondi            quanto ci ha messo (su CPU e' un criterio vero)
++  f1                 il token_level_eval della stessa pagina, come termine
++                     di paragone indipendente
++
++L'ultima colonna e' la piu' interessante. Un judge utile deve essere
++d'accordo con la metrica quando la metrica e' affidabile: se un modello da'
++5 a una pagina con F1 di 0.4, non sta giudicando, sta tirando a indovinare.
++Lo script calcola la correlazione di rango fra judge_score e F1 per dare a
++quell'intuizione un numero.
++
++Uso (dalla cartella backend/, con lo stack gia' avviato):
++
++    python tools/benchmark_judge.py
++        prova tutti e cinque i modelli su 3 pagine per dominio
++
++    python tools/benchmark_judge.py --models llama3.2:3b phi4-mini --per-domain 5
++        limita il confronto a due modelli, su 5 pagine per dominio
++
++    python tools/benchmark_judge.py --pull
++        scarica i modelli mancanti prima di iniziare (richiede tempo e spazio)
++
++Produce due file, come nell'esercizio della lezione su Ollama:
++    judge_benchmark_summary.md    una riga per modello
++    judge_benchmark_details.json  ogni singola risposta, per rileggerle
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import sys
++import time
++from collections import defaultdict
++from pathlib import Path
++from typing import Optional
++
++BASE_DIR = Path(__file__).resolve().parents[1]      # cartella backend/
++sys.path.insert(0, str(BASE_DIR))
++
++import requests                                                      # noqa: E402
++
++from src.parsers.registry import get_parser                          # noqa: E402
++from src.services.evaluator import token_level_eval                  # noqa: E402
++
++# I cinque modelli ammessi dalla consegna.
++CANDIDATE_MODELS = [
++    "gemma4:e2b",
++    "llama3.2:3b",
++    "phi4-mini",
++    "qwen3:4b",
++    "ministral-3:3b",
++]
++
++OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
++
++
++def resolve_gs_dir() -> Path:
++    """Cartella dei Gold Standard, cercata accanto a backend/ e nella root."""
++    for name in ("gs_data", "gsdata"):
++        for candidate in (BASE_DIR / name, BASE_DIR.parent / name):
++            if candidate.is_dir():
++                return candidate
++    raise SystemExit("Cartella gs_data/ non trovata")
++
++
++def load_samples(per_domain: int) -> list[dict]:
++    """
++    Prende alcune pagine per dominio, saltando quelle senza gold_text.
++
++    Si campiona a intervalli regolari invece di prendere le prime N: le prime
++    entry di un file tendono a essere le pagine piu' simili fra loro, e un
++    campione poco vario non distingue i modelli.
++    """
++    samples: list[dict] = []
++
++    for path in sorted(resolve_gs_dir().glob("*_gs.json")):
++        try:
++            data = json.loads(path.read_text(encoding="utf-8"))
++        except (OSError, json.JSONDecodeError):
++            continue
++
++        usable = [e for e in data
++                  if isinstance(e, dict) and e.get("gold_text") and e.get("html_text")]
++        if not usable:
++            print(f"  [skip] {path.name}: nessuna entry con gold_text")
++            continue
++
++        step = max(1, len(usable) // per_domain)
++        samples.extend(usable[::step][:per_domain])
++
++    return samples
++
++
++def prepare(samples: list[dict]) -> list[dict]:
++    """Esegue il parsing una volta sola: i modelli devono vedere lo stesso input."""
++    prepared: list[dict] = []
++
++    for entry in samples:
++        parser, _ = get_parser(entry["url"])
++        if parser is None:
++            continue
++
++        try:
++            parsed_text = parser(entry["url"], html_text=entry["html_text"]).get("parsed_text", "")
++        except Exception as exc:
++            print(f"  [skip] parsing fallito su {entry['url']}: {exc}")
++            continue
++
++        scores = token_level_eval(parsed_text, entry["gold_text"])
++        prepared.append({
++            "url": entry["url"],
++            "domain": entry.get("domain", ""),
++            "parsed_text": parsed_text,
++            "gold_text": entry["gold_text"],
++            "f1": scores["f1"],
++        })
++
++    return prepared
++
++
++def installed_models() -> set[str]:
++    """Modelli gia' presenti nel container Ollama."""
++    try:
++        response = requests.get(f"{OLLAMA_URL}/api/tags", timeout=10)
++        response.raise_for_status()
++        return {m.get("name", "") for m in response.json().get("models", [])}
++    except Exception as exc:
++        raise SystemExit(f"Ollama non raggiungibile su {OLLAMA_URL}: {exc}")
++
++
++def pull_model(model: str) -> bool:
++    """Scarica un modello. Puo' richiedere parecchi minuti."""
++    print(f"  scarico {model}...")
++    try:
++        response = requests.post(f"{OLLAMA_URL}/api/pull",
++                                 json={"model": model, "stream": False},
++                                 timeout=3600)
++        response.raise_for_status()
++        return True
++    except Exception as exc:
++        print(f"  [err ] impossibile scaricare {model}: {exc}")
++        return False
++
++
++def spearman(xs: list[float], ys: list[float]) -> Optional[float]:
++    """
++    Correlazione di rango fra due serie.
++
++    Si usa il rango e non i valori grezzi perche' judge_score e' una scala
++    ordinale da 1 a 5: interessa se i due criteri ordinano le pagine allo
++    stesso modo, non se i numeri coincidono.
++    """
++    n = len(xs)
++    if n < 3:
++        return None
++
++    def ranks(values: list[float]) -> list[float]:
++        order = sorted(range(n), key=lambda i: values[i])
++        result = [0.0] * n
++        i = 0
++        while i < n:
++            j = i
++            while j + 1 < n and values[order[j + 1]] == values[order[i]]:
++                j += 1
++            average = (i + j) / 2 + 1
++            for k in range(i, j + 1):
++                result[order[k]] = average
++            i = j + 1
++        return result
++
++    rx, ry = ranks(xs), ranks(ys)
++    mx, my = sum(rx) / n, sum(ry) / n
++    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
++    den = (sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry)) ** 0.5
++    return round(num / den, 3) if den else None
++
++
++def run_model(model: str, cases: list[dict]) -> list[dict]:
++    """Fa giudicare a un modello tutti i casi preparati."""
++    # Importato qui e non in cima perche' evaluate_judge legge il modello di
++    # default dall'ambiente: il modulo va caricato dopo che lo abbiamo fissato.
++    from src.services.judge import evaluate_judge
++
++    results: list[dict] = []
++    for index, case in enumerate(cases, start=1):
++        started = time.monotonic()
++        verdict = evaluate_judge(case["parsed_text"], case["gold_text"], model_name=model)
++        elapsed = time.monotonic() - started
++
++        results.append({
++            "url": case["url"],
++            "domain": case["domain"],
++            "f1": round(case["f1"], 4),
++            "judge_score": verdict["judge_score"],
++            "valid_json": verdict["parse_ok"],
++            "seconds": round(elapsed, 1),
++            "feedback": verdict["judge_feedback"],
++        })
++        print(f"    [{index}/{len(cases)}] score={verdict['judge_score']} "
++              f"json={'ok' if verdict['parse_ok'] else 'KO'} "
++              f"{elapsed:5.1f}s  f1={case['f1']:.3f}  {case['url'][-45:]}")
++
++    return results
++
++
++def summarize(results_by_model: dict[str, list[dict]]) -> str:
++    """Tabella riassuntiva in Markdown, una riga per modello."""
++    lines = [
++        "# Confronto dei modelli candidati come judge",
++        "",
++        "| Modello | Voto medio | JSON validi | Secondi medi | Correlazione con F1 |",
++        "|---|---|---|---|---|",
++    ]
++
++    for model, rows in results_by_model.items():
++        if not rows:
++            lines.append(f"| {model} | — | — | — | non disponibile |")
++            continue
++
++        n = len(rows)
++        avg_score = sum(r["judge_score"] for r in rows) / n
++        valid = sum(1 for r in rows if r["valid_json"]) / n
++        avg_time = sum(r["seconds"] for r in rows) / n
++        rho = spearman([r["f1"] for r in rows], [float(r["judge_score"]) for r in rows])
++
++        lines.append(
++            f"| {model} | {avg_score:.2f} | {valid:.0%} | {avg_time:.1f} | "
++            f"{rho if rho is not None else 'campione troppo piccolo'} |"
++        )
++
++    lines += [
++        "",
++        "Come leggere la tabella:",
++        "",
++        "- **JSON validi** sotto il 100% significa che il fallback e' entrato in funzione:",
++        "  un modello che sbaglia spesso formato non e' affidabile come giudice automatico.",
++        "- **Correlazione con F1** vicina a 1 indica che il judge ordina le pagine come la",
++        "  metrica; vicina a 0 che sta dando voti scollegati dalla qualita' reale.",
++        "- **Secondi medi** conta: il judge viene chiamato su ogni entry del Gold Standard.",
++        "",
++        "Attenzione: una correlazione bassa non condanna automaticamente il modello.",
++        "La token_level_eval lavora su insiemi di token e ignora ordine e ripetizioni,",
++        "quindi puo' premiare testi che un lettore umano giudicherebbe peggiori. Vale la",
++        "pena leggere i feedback in judge_benchmark_details.json prima di decidere.",
++    ]
++    return "\n".join(lines)
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description="Confronto fra i modelli judge")
++    parser.add_argument("--models", nargs="+", default=CANDIDATE_MODELS,
++                        help="modelli da confrontare (default: tutti e cinque)")
++    parser.add_argument("--per-domain", type=int, default=3,
++                        help="pagine da valutare per ogni dominio (default 3)")
++    parser.add_argument("--pull", action="store_true",
++                        help="scarica i modelli mancanti prima di iniziare")
++    args = parser.parse_args()
++
++    print("Preparo il campione")
++    samples = load_samples(args.per_domain)
++    cases = prepare(samples)
++    if not cases:
++        raise SystemExit("Nessuna pagina utilizzabile: serve almeno un gold_text compilato.")
++    print(f"  {len(cases)} pagine pronte\n")
++
++    available = installed_models()
++    results: dict[str, list[dict]] = {}
++
++    for model in args.models:
++        present = any(name == model or name.startswith(f"{model}:") for name in available)
++        if not present:
++            if not args.pull:
++                print(f"[skip] {model} non installato (usa --pull per scaricarlo)")
++                results[model] = []
++                continue
++            if not pull_model(model):
++                results[model] = []
++                continue
++
++        print(f"\n=== {model} ===")
++        results[model] = run_model(model, cases)
++
++    summary = summarize(results)
++    Path("judge_benchmark_summary.md").write_text(summary, encoding="utf-8")
++    Path("judge_benchmark_details.json").write_text(
++        json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
++
++    print("\n" + summary)
++    print("\nScritti judge_benchmark_summary.md e judge_benchmark_details.json")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index b7798fd..15cfaad 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -1,16 +1,124 @@
++# Orchestrazione dei quattro servizi del progetto.
++# Avvio completo con un solo comando:  docker compose up --build
++#
++# Le porte esposte sono quelle imposte dalla consegna e non vanno cambiate:
++#   backend 8003 · frontend 8004 · mariadb 3306 · ollama 11434
++#
++# Tutti i percorsi sono relativi alla cartella che contiene questo file.
++
+ services:
++
++  # ---------------------------------------------------------------------------
++  # Database relazionale. init.sql viene eseguito automaticamente alla prima
++  # creazione del data directory e definisce lo schema; i dati li carica il
++  # backend all'avvio, leggendo i JSON in gs_data/.
++  # ---------------------------------------------------------------------------
++  mariadb:
++    image: mariadb:11.7.2-ubi9
++    container_name: lab_mariadb
++    restart: unless-stopped
++    environment:
++      MARIADB_ROOT_PASSWORD: root_password
++      MARIADB_DATABASE: parsing_db
++      MARIADB_USER: lab_user
++      MARIADB_PASSWORD: lab_password
++    ports:
++      - "3306:3306"
++    volumes:
++      # Lo schema, in sola lettura: il container lo esegue al primo avvio.
++      - ./mariadb_data/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
++      # I file del database stanno in un volume gestito da Docker e non in una
++      # cartella del progetto: evita i problemi di permessi su Linux (niente
++      # chmod 777) e tiene lo zip di consegna pulito.
++      - mariadb_storage:/var/lib/mysql
++    healthcheck:
++      # healthcheck.sh e' fornito dall'immagine ufficiale. Serve perche'
++      # MariaDB accetta connessioni parecchi secondi dopo l'avvio del
++      # container: senza questo il backend partirebbe troppo presto.
++      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
++      interval: 5s
++      timeout: 5s
++      retries: 30
++      start_period: 30s
++
++  # ---------------------------------------------------------------------------
++  # Server LLM locale. L'entrypoint personalizzato avvia il server e scarica
++  # il modello, cosi' il sistema e' pronto senza passaggi manuali come
++  # richiede la consegna.
++  # ---------------------------------------------------------------------------
++  ollama:
++    image: ollama/ollama:latest
++    container_name: lab_ollama
++    restart: unless-stopped
++    environment:
++      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
++      # Un solo modello in memoria e tenuto caldo: su CPU il caricamento
++      # pesa piu' della generazione.
++      OLLAMA_KEEP_ALIVE: 24h
++      OLLAMA_MAX_LOADED_MODELS: "1"
++    ports:
++      - "11434:11434"
++    volumes:
++      - ./ollama_data/entrypoint.sh:/entrypoint.sh:ro
++      - ollama_storage:/root/.ollama
++    # Invocato via sh in modo esplicito: cosi' funziona anche se il file
++    # perde il bit di esecuzione passando per git o per uno zip.
++    entrypoint: ["/bin/sh", "/entrypoint.sh"]
++    healthcheck:
++      test: ["CMD-SHELL", "ollama list | grep -q ':' || exit 1"]
++      interval: 10s
++      timeout: 5s
++      retries: 60
++      start_period: 60s
++
++  # ---------------------------------------------------------------------------
++  # API REST, parser e logica di valutazione.
++  # ---------------------------------------------------------------------------
+   backend:
+     build:
+       context: .
+       dockerfile: backend/Dockerfile
++    container_name: lab_backend
++    restart: unless-stopped
++    environment:
++      DB_HOST: mariadb
++      DB_PORT: "3306"
++      DB_USER: lab_user
++      DB_PASSWORD: lab_password
++      DB_NAME: parsing_db
++      OLLAMA_URL: http://ollama:11434
++      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
++      # Caratteri di testo inviati al judge. La consegna consente di
++      # troncare: su CPU e' la differenza fra un test che finisce e uno che
++      # va in timeout.
++      JUDGE_MAX_CHARS: "2000"
++      # Precalcolo dei giudizi sul Gold Standard all'avvio, in background.
++      # Serve a /db_stats, che per specifica legge dati gia' calcolati.
++      JUDGE_ON_INIT: "true"
+     ports:
+       - "8003:8003"
++    depends_on:
++      mariadb:
++        condition: service_healthy
++      ollama:
++        condition: service_started
+ 
++  # ---------------------------------------------------------------------------
++  # Web UI. Parla solo con il backend via REST, mai con il database.
++  # ---------------------------------------------------------------------------
+   frontend:
+     build:
+       context: .
+       dockerfile: frontend/Dockerfile
++    container_name: lab_frontend
++    restart: unless-stopped
++    environment:
++      API_BASE_URL: http://backend:8003
+     ports:
+       - "8004:8004"
+     depends_on:
+-      - backend
+\ No newline at end of file
++      - backend
++
++volumes:
++  mariadb_storage:
++  ollama_storage:
+diff --git a/frontend/Dockerfile b/frontend/Dockerfile
+index e41f960..06ccb3c 100644
+--- a/frontend/Dockerfile
++++ b/frontend/Dockerfile
+@@ -7,4 +7,6 @@ RUN pip install --no-cache-dir -r requirements.txt
+ 
+ COPY frontend/src ./src
+ 
+-CMD ["uvicorn", "src.frontend:app", "--host", "0.0.0.0", "--port", "8004"]
+\ No newline at end of file
++EXPOSE 8004
++
++CMD ["uvicorn", "src.frontend:app", "--host", "0.0.0.0", "--port", "8004"]
+diff --git a/frontend/src/frontend.py b/frontend/src/frontend.py
+index 42a389c..cf1421a 100644
+--- a/frontend/src/frontend.py
++++ b/frontend/src/frontend.py
+@@ -1,13 +1,16 @@
+ from fastapi import FastAPI, Request, Form
+ from fastapi.responses import HTMLResponse
+ from fastapi.templating import Jinja2Templates
++import os
++
+ import requests
+ 
+ 
+ app = FastAPI()
+ templates = Jinja2Templates(directory="src/templates")
+ 
+-API_BASE_URL = "http://backend:8003"
++# Impostato dal docker-compose; il default serve solo all'esecuzione locale.
++API_BASE_URL = os.getenv("API_BASE_URL", "http://backend:8003")
+ 
+ 
+ def safe_get(url: str, params: dict | None = None):
+diff --git a/gsdata/basketballreference_gs.json b/gs_data/basketballreference_gs.json
+similarity index 100%
+rename from gsdata/basketballreference_gs.json
+rename to gs_data/basketballreference_gs.json
+diff --git a/gsdata/wikipedia_gs.json b/gs_data/wikipedia_gs.json
+similarity index 100%
+rename from gsdata/wikipedia_gs.json
+rename to gs_data/wikipedia_gs.json
+diff --git a/gsdata/morningstar_gs.json b/gsdata/morningstar_gs.json
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/gsdata/tradingview_gs.json b/gsdata/tradingview_gs.json
+deleted file mode 100644
+index e69de29..0000000
+diff --git a/mariadb_data/init.sql b/mariadb_data/init.sql
+new file mode 100644
+index 0000000..fcc0782
+--- /dev/null
++++ b/mariadb_data/init.sql
+@@ -0,0 +1,128 @@
++-- Schema del database del progetto.
++--
++-- Questo file viene montato in /docker-entrypoint-initdb.d/ del container
++-- MariaDB ed eseguito automaticamente alla prima creazione del data
++-- directory, prima che qualunque altro servizio possa collegarsi.
++-- Qui c'e' solo DDL: i dati (Gold Standard e HTML) vengono caricati dal
++-- backend con MariaDB Connector/Python, cosi' i file JSON restano l'unica
++-- fonte di verita' e non vanno duplicati dentro un dump SQL da megabyte.
++
++CREATE DATABASE IF NOT EXISTS parsing_db
++    CHARACTER SET utf8mb4
++    COLLATE utf8mb4_unicode_ci;
++
++USE parsing_db;
++
++
++-- ---------------------------------------------------------------------------
++-- web_resources: le pagine scaricate, con l'HTML grezzo.
++-- Nome e colonne sono fissati dalla consegna: i test automatici scrivono
++-- direttamente in questa tabella per forzare l'uso dell'HTML locale.
++--
++-- Nota su url VARCHAR(2048) come PRIMARY KEY.
++-- InnoDB limita una chiave a 3072 byte. In utf8mb4 un carattere occupa fino
++-- a 4 byte, quindi 2048 caratteri varrebbero 8192 byte e la CREATE TABLE
++-- fallirebbe. Gli URL sono ASCII per definizione (RFC 3986: i caratteri
++-- fuori set vanno percent-encoded), quindi si dichiara la colonna in ascii:
++-- 2048 byte, sotto il limite, e la lunghezza richiesta dalla specifica resta
++-- esattamente quella. La collation ascii_bin rende inoltre il confronto
++-- case-sensitive, che e' il comportamento giusto per un URL.
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS web_resources (
++    url        VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
++    domain     VARCHAR(255)  NOT NULL,
++    title      VARCHAR(2048) NOT NULL DEFAULT '',
++    html_text  LONGTEXT      NOT NULL,
++    created_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (url),
++    INDEX idx_web_resources_domain (domain)
++) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
++
++
++-- ---------------------------------------------------------------------------
++-- gold_standard: il testo di riferimento estratto a mano.
++-- Relazione uno-a-uno con web_resources, come richiesto: la stessa colonna
++-- e' insieme chiave primaria (quindi unica) e chiave esterna.
++-- ON DELETE CASCADE implementa il requisito di DELETE /web_resource, che
++-- deve rimuovere a cascata il gold standard associato.
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS gold_standard (
++    url        VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
++    gold_text  LONGTEXT NOT NULL,
++    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    PRIMARY KEY (url),
++    CONSTRAINT fk_gold_standard_web_resource
++        FOREIGN KEY (url) REFERENCES web_resources (url)
++        ON DELETE CASCADE ON UPDATE CASCADE
++) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
++
++
++-- ---------------------------------------------------------------------------
++-- parsed_documents: l'output del parser per una risorsa.
++-- Tabella libera. Serve a /db_stats, che per specifica deve leggere dati
++-- gia' calcolati invece di rifare il parsing a ogni chiamata.
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS parsed_documents (
++    id          INT AUTO_INCREMENT PRIMARY KEY,
++    url         VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
++    parser_name VARCHAR(128) NOT NULL,
++    parsed_text LONGTEXT     NOT NULL,
++    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    UNIQUE KEY uq_parsed_documents_url (url),
++    CONSTRAINT fk_parsed_documents_web_resource
++        FOREIGN KEY (url) REFERENCES web_resources (url)
++        ON DELETE CASCADE ON UPDATE CASCADE
++) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
++
++
++-- ---------------------------------------------------------------------------
++-- evaluations: i risultati delle metriche automatiche.
++-- Una riga per (url, metrica): la tabella non va modificata per aggiungere
++-- una metrica nuova, basta inserire righe con un metric_name diverso.
++-- precision/recall/f1 servono a token_level_eval, score alle metriche che
++-- producono un valore singolo.
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS evaluations (
++    id          INT AUTO_INCREMENT PRIMARY KEY,
++    url         VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
++    metric_name VARCHAR(64)  NOT NULL,
++    precision_v DECIMAL(6,5) NULL,
++    recall_v    DECIMAL(6,5) NULL,
++    f1_v        DECIMAL(6,5) NULL,
++    score_v     DECIMAL(6,5) NULL,
++    created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    UNIQUE KEY uq_evaluations_url_metric (url, metric_name),
++    CONSTRAINT fk_evaluations_web_resource
++        FOREIGN KEY (url) REFERENCES web_resources (url)
++        ON DELETE CASCADE ON UPDATE CASCADE
++) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
++
++
++-- ---------------------------------------------------------------------------
++-- judgements: i giudizi dell'LLM.
++-- model_name fa parte della chiave: cosi' si possono confrontare piu'
++-- modelli sulla stessa pagina, che e' quello che serve per motivare nel
++-- report la scelta del judge definitivo.
++-- ---------------------------------------------------------------------------
++CREATE TABLE IF NOT EXISTS judgements (
++    id             INT AUTO_INCREMENT PRIMARY KEY,
++    url            VARCHAR(2048) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
++    model_name     VARCHAR(128) NOT NULL,
++    judge_score    TINYINT      NOT NULL,
++    judge_feedback TEXT         NOT NULL,
++    parse_ok       BOOLEAN      NOT NULL DEFAULT TRUE,
++    created_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    UNIQUE KEY uq_judgements_url_model (url, model_name),
++    CONSTRAINT chk_judge_score CHECK (judge_score BETWEEN 1 AND 5),
++    CONSTRAINT fk_judgements_web_resource
++        FOREIGN KEY (url) REFERENCES web_resources (url)
++        ON DELETE CASCADE ON UPDATE CASCADE
++) ENGINE=InnoDB ROW_FORMAT=DYNAMIC;
++
++
++-- L'utente applicativo e' creato dalle variabili d'ambiente del container
++-- (MARIADB_USER / MARIADB_PASSWORD) sul solo database MARIADB_DATABASE.
++-- Qui si estendono i privilegi al database creato sopra, perche' il backend
++-- lavora su parsing_db e non sul database di default.
++GRANT ALL PRIVILEGES ON parsing_db.* TO 'lab_user'@'%';
++FLUSH PRIVILEGES;
+diff --git a/ollama_data/entrypoint.sh b/ollama_data/entrypoint.sh
+new file mode 100644
+index 0000000..5640e4d
+--- /dev/null
++++ b/ollama_data/entrypoint.sh
+@@ -0,0 +1,48 @@
++#!/bin/sh
++# Entrypoint del container Ollama.
++#
++# L'immagine ufficiale avvia soltanto il server: il modello andrebbe scaricato
++# a mano con "ollama pull". La consegna pero' richiede che il modello sia
++# "importato automaticamente all'avvio" e che fra "docker compose up --build"
++# e lo script di test non ci sia nessun passaggio intermedio.
++#
++# Quindi: si avvia il server in background, si aspetta che risponda, si
++# scarica il modello e poi si resta in attesa del processo del server, che
++# rimane il processo principale del container.
++
++set -e
++
++MODEL="${OLLAMA_MODEL:-llama3.2:3b}"
++
++echo "[ollama] avvio del server"
++ollama serve &
++SERVER_PID=$!
++
++# Il server impiega qualche secondo prima di accettare richieste.
++echo "[ollama] attendo che il server risponda"
++i=0
++while [ "$i" -lt 60 ]; do
++    if ollama list >/dev/null 2>&1; then
++        break
++    fi
++    i=$((i + 1))
++    sleep 1
++done
++
++if ! ollama list >/dev/null 2>&1; then
++    echo "[ollama] il server non risponde dopo 60 secondi"
++    exit 1
++fi
++
++# Se il modello e' gia' nel volume, pull esce subito senza riscaricare nulla.
++if ollama list | grep -q "^${MODEL}"; then
++    echo "[ollama] modello ${MODEL} gia' presente"
++else
++    echo "[ollama] scarico il modello ${MODEL} (la prima volta puo' richiedere alcuni minuti)"
++    ollama pull "${MODEL}"
++fi
++
++echo "[ollama] pronto con il modello ${MODEL}"
++
++# Il container resta vivo finche' vive il server.
++wait "${SERVER_PID}"

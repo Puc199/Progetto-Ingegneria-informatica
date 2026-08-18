@@ -1,16 +1,128 @@
+# Orchestrazione dei quattro servizi del progetto.
+# Avvio completo con un solo comando:  docker compose up --build
+#
+# Le porte esposte sono quelle imposte dalla consegna e non vanno cambiate:
+#   backend 8003 · frontend 8004 · mariadb 3306 · ollama 11434
+#
+# Tutti i percorsi sono relativi alla cartella che contiene questo file.
+
 services:
+
+  # ---------------------------------------------------------------------------
+  # Database relazionale. init.sql viene eseguito automaticamente alla prima
+  # creazione del data directory e definisce lo schema; i dati li carica il
+  # backend all'avvio, leggendo i JSON in gs_data/.
+  # ---------------------------------------------------------------------------
+  mariadb:
+    # Costruito invece che usato direttamente, cosi' lo schema viaggia dentro
+    # l'immagine e il compose non ha bisogno di nessun bind mount.
+    build:
+      context: ./mariadb_data
+      dockerfile: Dockerfile
+    container_name: lab_mariadb
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password
+      MARIADB_DATABASE: parsing_db
+      MARIADB_USER: lab_user
+      MARIADB_PASSWORD: lab_password
+    ports:
+      - "3306:3306"
+    volumes:
+      # I file del database stanno in un volume gestito da Docker e non in una
+      # cartella del progetto: evita i problemi di permessi su Linux (niente
+      # chmod 777) e tiene lo zip di consegna pulito.
+      - mariadb_storage:/var/lib/mysql
+    healthcheck:
+      # healthcheck.sh e' fornito dall'immagine ufficiale. Serve perche'
+      # MariaDB accetta connessioni parecchi secondi dopo l'avvio del
+      # container: senza questo il backend partirebbe troppo presto.
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Server LLM locale. L'entrypoint personalizzato avvia il server e scarica
+  # il modello, cosi' il sistema e' pronto senza passaggi manuali come
+  # richiede la consegna.
+  # ---------------------------------------------------------------------------
+  ollama:
+    # Costruito invece che usato direttamente: il Dockerfile incorpora
+    # l'entrypoint che scarica il modello e ne normalizza i fine riga, cosi'
+    # l'avvio funziona identico partendo da Windows, macOS o Linux.
+    build:
+      context: ./ollama_data
+      dockerfile: Dockerfile
+    container_name: lab_ollama
+    restart: unless-stopped
+    environment:
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+      # Un solo modello in memoria e tenuto caldo: su CPU il caricamento
+      # pesa piu' della generazione.
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_MAX_LOADED_MODELS: "1"
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_storage:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list | grep -q ':' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # API REST, parser e logica di valutazione.
+  # ---------------------------------------------------------------------------
   backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    container_name: lab_backend
+    restart: unless-stopped
+    environment:
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_USER: lab_user
+      DB_PASSWORD: lab_password
+      DB_NAME: parsing_db
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
+      # Caratteri di testo inviati al judge. La consegna consente di
+      # troncare: su CPU e' la differenza fra un test che finisce e uno che
+      # va in timeout.
+      JUDGE_MAX_CHARS: "2000"
+      # Precalcolo dei giudizi sul Gold Standard all'avvio, in background.
+      # Serve a /db_stats, che per specifica legge dati gia' calcolati.
+      JUDGE_ON_INIT: "true"
     ports:
       - "8003:8003"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      ollama:
+        condition: service_started
 
+  # ---------------------------------------------------------------------------
+  # Web UI. Parla solo con il backend via REST, mai con il database.
+  # ---------------------------------------------------------------------------
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
+    container_name: lab_frontend
+    restart: unless-stopped
+    environment:
+      API_BASE_URL: http://backend:8003
+      MATRICOLE: "2018687, 1994172, 2129091"
     ports:
       - "8004:8004"
     depends_on:
       - backend
+
+volumes:
+  mariadb_storage:
+  ollama_storage:

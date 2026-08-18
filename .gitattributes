@@ -1,0 +1,15 @@
+# Su Windows git converte i fine riga in CRLF al checkout (core.autocrlf=true
+# e' il default di Git for Windows). Per uno script di shell e' fatale: dentro
+# il container Linux /bin/sh vede il \r finale come parte del comando e
+# fallisce con errori incomprensibili tipo "bad interpreter" o "\r: not found".
+#
+# Si fissa LF solo per i file eseguiti o letti dentro i container. I sorgenti
+# Python e i template restano volutamente fuori: imporre anche a loro una
+# conversione rinormalizzerebbe l'intero repository, producendo un diff enorme
+# che nasconderebbe le modifiche vere.
+
+*.sh          text eol=lf
+*.sql         text eol=lf
+Dockerfile    text eol=lf
+*.yaml        text eol=lf
+*.yml         text eol=lf

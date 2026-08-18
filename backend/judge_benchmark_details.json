@@ -1,0 +1,282 @@
+{
+  "llama3.2:3b": [
+    {
+      "url": "https://www.basketball-reference.com/players/j/jamesle01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9915,
+      "judge_score": 3,
+      "valid_json": true,
+      "seconds": 19.6,
+      "feedback": "Most of the key facts are present, but some details and context are missing."
+    },
+    {
+      "url": "https://www.basketball-reference.com/playoffs/2020-nba-finals-heat-vs-lakers.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9669,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 3.5,
+      "feedback": "Minor omissions and some noise in the extraction."
+    },
+    {
+      "url": "https://www.basketball-reference.com/players/d/duncati01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9107,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 6.4,
+      "feedback": "Minor omissions and some boilerplate present"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Pear",
+      "domain": "en.wikipedia.org",
+      "f1": 0.9037,
+      "judge_score": 5,
+      "valid_json": true,
+      "seconds": 6.7,
+      "feedback": "No boilerplate, all informative content present and accurately extracted."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/One-way_mirror",
+      "domain": "en.wikipedia.org",
+      "f1": 0.8884,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 4.8,
+      "feedback": "Minor omissions and some boilerplate present"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Crystal_Castles",
+      "domain": "en.wikipedia.org",
+      "f1": 0.985,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 4.5,
+      "feedback": "Minor omissions and some leftover boilerplate present."
+    }
+  ],
+  "phi4-mini": [
+    {
+      "url": "https://www.basketball-reference.com/players/j/jamesle01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9915,
+      "judge_score": 3,
+      "valid_json": true,
+      "seconds": 53.5,
+      "feedback": "Missing some achievements and details about his career."
+    },
+    {
+      "url": "https://www.basketball-reference.com/playoffs/2020-nba-finals-heat-vs-lakers.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9669,
+      "judge_score": 3,
+      "valid_json": true,
+      "seconds": 8.7,
+      "feedback": "Missing some game details and player statistics."
+    },
+    {
+      "url": "https://www.basketball-reference.com/players/d/duncati01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9107,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 15.3,
+      "feedback": "Missing some FAQs details like 'How much is his net worth?'"
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Pear",
+      "domain": "en.wikipedia.org",
+      "f1": 0.9037,
+      "judge_score": 3,
+      "valid_json": true,
+      "seconds": 12.4,
+      "feedback": "Missing some descriptive content about pears."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/One-way_mirror",
+      "domain": "en.wikipedia.org",
+      "f1": 0.8884,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 10.4,
+      "feedback": "Missing some applications and minor omissions."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Crystal_Castles",
+      "domain": "en.wikipedia.org",
+      "f1": 0.985,
+      "judge_score": 3,
+      "valid_json": true,
+      "seconds": 11.1,
+      "feedback": "Missing some details about 'History' and incomplete sentence."
+    }
+  ],
+  "qwen3:4b": [
+    {
+      "url": "https://www.basketball-reference.com/players/j/jamesle01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9915,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 40.0,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://www.basketball-reference.com/playoffs/2020-nba-finals-heat-vs-lakers.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9669,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 21.9,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://www.basketball-reference.com/players/d/duncati01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9107,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 31.0,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Pear",
+      "domain": "en.wikipedia.org",
+      "f1": 0.9037,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 26.5,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/One-way_mirror",
+      "domain": "en.wikipedia.org",
+      "f1": 0.8884,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 23.0,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Crystal_Castles",
+      "domain": "en.wikipedia.org",
+      "f1": 0.985,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 24.6,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    }
+  ],
+  "ministral-3:3b": [
+    {
+      "url": "https://www.basketball-reference.com/players/j/jamesle01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9915,
+      "judge_score": 3,
+      "valid_json": true,
+      "seconds": 24.6,
+      "feedback": "Missing key details (nicknames, age range, draft year specifics) and repeats some boilerplate transaction entries."
+    },
+    {
+      "url": "https://www.basketball-reference.com/playoffs/2020-nba-finals-heat-vs-lakers.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9669,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 8.6,
+      "feedback": "Missing minor formatting (e.g., 'Final' bolding) but retains all key stats and game summaries accurately."
+    },
+    {
+      "url": "https://www.basketball-reference.com/players/d/duncati01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9107,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 15.1,
+      "feedback": "Missing key biographical details (e.g., full name aliases, birth age calculation) but retains most core facts with minor errors."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Pear",
+      "domain": "en.wikipedia.org",
+      "f1": 0.9037,
+      "judge_score": 5,
+      "valid_json": true,
+      "seconds": 10.6,
+      "feedback": "Informative content matches perfectly with no omissions or boilerplate."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/One-way_mirror",
+      "domain": "en.wikipedia.org",
+      "f1": 0.8884,
+      "judge_score": 5,
+      "valid_json": true,
+      "seconds": 8.8,
+      "feedback": "Informative content matches perfectly with no boilerplate or omissions."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Crystal_Castles",
+      "domain": "en.wikipedia.org",
+      "f1": 0.985,
+      "judge_score": 4,
+      "valid_json": true,
+      "seconds": 11.0,
+      "feedback": "Minor omissions (e.g., 'Several limited-ed [...]) and minor formatting differences but no major content loss."
+    }
+  ],
+  "gemma4:e2b": [
+    {
+      "url": "https://www.basketball-reference.com/players/j/jamesle01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9915,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 94.6,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://www.basketball-reference.com/playoffs/2020-nba-finals-heat-vs-lakers.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9669,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 15.9,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://www.basketball-reference.com/players/d/duncati01.html",
+      "domain": "www.basketball-reference.com",
+      "f1": 0.9107,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 19.6,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Pear",
+      "domain": "en.wikipedia.org",
+      "f1": 0.9037,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 17.7,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/One-way_mirror",
+      "domain": "en.wikipedia.org",
+      "f1": 0.8884,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 18.1,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    },
+    {
+      "url": "https://en.wikipedia.org/wiki/Crystal_Castles",
+      "domain": "en.wikipedia.org",
+      "f1": 0.985,
+      "judge_score": 1,
+      "valid_json": false,
+      "seconds": 18.3,
+      "feedback": "Il modello non ha restituito alcuna risposta."
+    }
+  ]
+}
