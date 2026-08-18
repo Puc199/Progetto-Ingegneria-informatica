@@ -211,30 +211,42 @@ con cui abbiamo scelto il modello.
 \begin{table}[htbp]
 \centering
 \footnotesize
-\setlength{\tabcolsep}{4pt}
-\begin{tabular}{lccc}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{lcccc}
 \toprule
-\textbf{Modello} & \textbf{media} & \textbf{JSON ok} & \textbf{tempo} \\
+\textbf{Modello} & \textbf{media} & \textbf{JSON} & \textbf{s} & \textbf{corr.} \\
 \midrule
-ministral-3:3b & 4.17 & 100\% & $\sim$13 s \\
-llama3.2:3b    & 4.00 & 100\% & $\sim$8 s \\
-phi4-mini      & 3.33 & 100\% & $\sim$19 s \\
-qwen3:4b       & --- & 0\% & --- \\
-gemma4:e2b     & --- & 0\% & --- \\
+ministral-3:3b & 4.17 & 100\% & 13.1 & $-0.926$ \\
+llama3.2:3b    & 4.00 & 100\% & 7.6  & $-0.676$ \\
+phi4-mini      & 3.33 & 100\% & 18.6 & $-0.621$ \\
+qwen3:4b       & 1.00 & 0\%   & 27.8 & --- \\
+gemma4:e2b     & 1.00 & 0\%   & 30.7 & --- \\
 \bottomrule
 \end{tabular}
-\caption{Confronto fra i cinque modelli ammessi.}
+\caption{Confronto fra i cinque modelli ammessi. ``corr.'' è la
+correlazione di rango fra il punteggio del judge e l'F1; il punteggio 1.00 dei
+due modelli senza JSON valido è il valore di fallback, non un giudizio.}
 \label{tab:judge}
 \end{table}
 
-Due modelli su cinque non hanno prodotto una singola risposta valida. Sono
-entrambi modelli che generano token di ragionamento prima della risposta, e il
-limite di generazione impostato li troncava prima che arrivassero al JSON: un
-esempio concreto del fatto che ``il modello non funziona'' e ``il modello è
-configurato male'' si assomigliano molto dall'esterno. Abbiamo scelto
-\texttt{ministral-3:3b}, che unisce il punteggio medio più alto alla piena
-affidabilità sul formato, accettando di essere più lento di
-\texttt{llama3.2:3b}.
+Due modelli su cinque non hanno prodotto una singola risposta valida, ed erano
+anche i due più lenti. Sono entrambi modelli che generano token di ragionamento
+prima della risposta, e il limite di generazione impostato li troncava prima che
+arrivassero al JSON: un esempio concreto del fatto che ``il modello non
+funziona'' e ``il modello è configurato male'' si assomigliano molto
+dall'esterno. Il punteggio 1.00 che compare per entrambi non è un giudizio, è il
+valore di fallback contato cinque volte su cinque.
+
+Abbiamo scelto \texttt{ministral-3:3b}: punteggio medio più alto, piena
+affidabilità sul formato e la correlazione più netta con la metrica automatica,
+accettando in cambio di essere più lento di \texttt{llama3.2:3b}.
+
+La colonna della correlazione merita una lettura attenta, perché il segno è
+\emph{negativo} per tutti e tre i modelli affidabili, e per il migliore vale
+$-0.926$. Non significa che il judge sbagli: significa che ordina le pagine
+quasi esattamente al contrario di come le ordina l'F1. È la stessa
+contraddizione visibile nella tabella~\ref{tab:parser}, qui misurata invece che
+osservata.
 
 Il risultato più interessante è però nella tabella~\ref{tab:parser}, dove le
 due valutazioni si contraddicono in modo sistematico. TradingView ha il
