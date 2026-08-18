@@ -170,41 +170,81 @@ def delete_gold_standard(url: str) -> int:
     return execute("DELETE FROM gold_standard WHERE url = ?", (url,))
 
 
+# Dimensione massima, in caratteri, di un singolo invio al database.
+#
+# MariaDB rifiuta i pacchetti piu' grandi di max_allowed_packet e chiude la
+# connessione senza spiegazioni: il client vede solo "Write error: Connection
+# reset by peer". Il valore predefinito del server e' 16 MB, e le pagine del
+# Gold Standard pesano fino a 1,9 MB di HTML l'una: bastano una decina di
+# righe nello stesso invio per superarlo.
+#
+# Quattro megabyte lasciano un margine ampio anche se il server e' configurato
+# al minimo, e il costo di spezzare l'inserimento in piu' invii e' trascurabile
+# rispetto al tempo di parsing che segue.
+MAX_BYTES_PER_BATCH = 4 * 1024 * 1024
+
+
+def _a_lotti(righe: list[tuple], limite: int = MAX_BYTES_PER_BATCH):
+    """
+    Divide le righe in gruppi che stanno sotto il limite di dimensione.
+
+    Il conteggio e' sulla lunghezza dei valori testuali, che e' quello che
+    determina la dimensione del pacchetto. Una riga piu' grande del limite
+    viene comunque inviata da sola: meglio provarci che scartarla.
+    """
+    lotto: list[tuple] = []
+    peso = 0
+
+    for riga in righe:
+        peso_riga = sum(len(v) for v in riga if isinstance(v, str))
+        if lotto and peso + peso_riga > limite:
+            yield lotto
+            lotto, peso = [], 0
+        lotto.append(riga)
+        peso += peso_riga
+
+    if lotto:
+        yield lotto
+
+
 def bulk_insert_gold_standard(entries: list[dict]) -> int:
     """
     Caricamento iniziale: inserisce risorse web e testi di riferimento.
 
     Le due tabelle si popolano in due passaggi perche' la foreign key impone
-    che la risorsa web esista prima del suo gold standard.
+    che la risorsa web esista prima del suo gold standard. Ogni passaggio e'
+    diviso in lotti per non superare max_allowed_packet (vedi _a_lotti).
     """
     resources = [
         (e["url"], e["domain"], e.get("title", ""), e.get("html_text", ""))
         for e in entries
     ]
-    execute_many(
-        """
-        INSERT INTO web_resources (url, domain, title, html_text)
-        VALUES (?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-            domain = VALUES(domain),
-            title = VALUES(title),
-            html_text = VALUES(html_text)
-        """,
-        resources,
-    )
+    for lotto in _a_lotti(resources):
+        execute_many(
+            """
+            INSERT INTO web_resources (url, domain, title, html_text)
+            VALUES (?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                domain = VALUES(domain),
+                title = VALUES(title),
+                html_text = VALUES(html_text)
+            """,
+            lotto,
+        )
 
     golds = [
         (e["url"], normalize_gold_text(e.get("gold_text", "")))
         for e in entries if e.get("gold_text")
     ]
-    execute_many(
-        """
-        INSERT INTO gold_standard (url, gold_text)
-        VALUES (?, ?)
-        ON DUPLICATE KEY UPDATE gold_text = VALUES(gold_text)
-        """,
-        golds,
-    )
+    for lotto in _a_lotti(golds):
+        execute_many(
+            """
+            INSERT INTO gold_standard (url, gold_text)
+            VALUES (?, ?)
+            ON DUPLICATE KEY UPDATE gold_text = VALUES(gold_text)
+            """,
+            lotto,
+        )
 
     return len(resources)
 
