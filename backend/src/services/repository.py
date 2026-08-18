@@ -215,6 +215,16 @@ def count_web_resources() -> int:
     return int(row["n"]) if row else 0
 
 
+def all_web_resource_urls() -> set[str]:
+    """Tutti gli URL presenti in web_resources, senza filtro sul dominio."""
+    return {row["url"] for row in fetch_all("SELECT url FROM web_resources")}
+
+
+def all_gold_standard_urls() -> set[str]:
+    """Tutti gli URL che hanno gia' un testo di riferimento."""
+    return {row["url"] for row in fetch_all("SELECT url FROM gold_standard")}
+
+
 # ---------------------------------------------------------------------------
 # parsed_documents, evaluations, judgements
 # ---------------------------------------------------------------------------

@@ -40,6 +40,14 @@ logger = logging.getLogger(__name__)
 
 JUDGE_ON_INIT = os.getenv("JUDGE_ON_INIT", "true").lower() in ("1", "true", "yes")
 
+# Ricaricamento forzato del Gold Standard dai file JSON, anche sulle entry gia'
+# presenti nel database. Spento di proposito: durante la costruzione del Gold
+# Standard i testi vivono nel database prima di essere esportati, e un riavvio
+# che li sovrascrivesse con la versione vecchia dei file cancellerebbe lavoro
+# manuale non riproducibile. Si accende quando i file sono la versione buona e
+# il database va riallineato:  GS_FORCE_RELOAD=true docker compose up -d
+GS_FORCE_RELOAD = os.getenv("GS_FORCE_RELOAD", "false").lower() in ("1", "true", "yes")
+
 # Quanti secondi attendere al massimo che Ollama abbia finito di scaricare il
 # modello, prima di rinunciare al precalcolo dei giudizi.
 JUDGE_WAIT_SECONDS = int(os.getenv("JUDGE_WAIT_SECONDS", "600"))
@@ -53,45 +61,112 @@ def _iter_gold_standard_files(gs_dir: Path) -> Iterable[Path]:
     return sorted(gs_dir.glob("*_gs.json"))
 
 
-def load_gold_standard_files(gs_dir: Path) -> int:
+def _entry_valide(path: Path) -> list[dict]:
     """
-    Carica nel database tutti i Gold Standard presenti su disco.
+    Entry leggibili di un file del Gold Standard.
 
     Le entry senza url o senza html_text vengono scartate con un avviso: una
     risorsa web senza HTML non serve a niente e farebbe fallire il parsing in
     fase di valutazione.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.error("Salto %s: %s", path.name, exc)
+        return []
+
+    if not isinstance(data, list):
+        logger.error("Salto %s: il file non contiene una lista di entry", path.name)
+        return []
+
+    valide = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        if not entry.get("url") or not entry.get("html_text"):
+            logger.warning("Salto un'entry di %s priva di url o html_text", path.name)
+            continue
+        valide.append(entry)
+
+    return valide
+
+
+def load_gold_standard_files(gs_dir: Path, force: bool = False) -> dict:
+    """
+    Allinea il database ai file JSON del Gold Standard.
+
+    Il criterio non e' "il database e' vuoto, quindi carico tutto": era quello
+    di prima, e aveva un difetto silenzioso. Bastava che il database contenesse
+    una riga qualsiasi perche' i file venissero ignorati per sempre, cosi' che
+    pagine aggiunte ai JSON non comparissero mai e nessuno se ne accorgesse.
+
+    Il criterio nuovo lavora per differenza:
+
+      * le entry presenti nei file ma assenti dal database vengono inserite,
+        sempre, a ogni avvio;
+      * le entry gia' presenti nel database NON vengono sovrascritte, a meno
+        che non si chieda esplicitamente il ricaricamento con la variabile
+        d'ambiente GS_FORCE_RELOAD. Il motivo e' pratico: durante la
+        costruzione del Gold Standard i testi si scrivono dalla Web UI e
+        vivono nel database prima di essere esportati. Un riavvio che li
+        sovrascrivesse con la versione vecchia dei file distruggerebbe ore di
+        lavoro manuale, che e' l'unica parte non riproducibile del sistema;
+      * se un URL ha gia' la risorsa web ma non ancora il testo di riferimento,
+        e il file ce l'ha, quello viene inserito: e' un buco da riempire, non
+        un dato da sovrascrivere.
 
     Returns:
-        Numero di entry caricate.
+        Riepilogo con inseriti, completati, gia' presenti e non_nei_file.
     """
-    total = 0
+    presenti = repository.all_web_resource_urls()
+    con_gold = repository.all_gold_standard_urls()
+
+    da_inserire: list[dict] = []
+    da_completare: list[dict] = []
+    gia_presenti = 0
+    url_nei_file: set[str] = set()
 
     for path in _iter_gold_standard_files(gs_dir):
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            logger.error("Salto %s: %s", path.name, exc)
+        entry = _entry_valide(path)
+        if not entry:
             continue
 
-        if not isinstance(data, list):
-            logger.error("Salto %s: il file non contiene una lista di entry", path.name)
-            continue
+        url_nei_file.update(e["url"] for e in entry)
 
-        valid = []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            if not entry.get("url") or not entry.get("html_text"):
-                logger.warning("Salto un'entry di %s priva di url o html_text", path.name)
-                continue
-            valid.append(entry)
+        for e in entry:
+            if force or e["url"] not in presenti:
+                da_inserire.append(e)
+            elif e.get("gold_text") and e["url"] not in con_gold:
+                da_completare.append(e)
+            else:
+                gia_presenti += 1
 
-        if valid:
-            repository.bulk_insert_gold_standard(valid)
-            total += len(valid)
-            logger.info("Caricate %d entry da %s", len(valid), path.name)
+        logger.info("Lette %d entry da %s", len(entry), path.name)
 
-    return total
+    if da_inserire:
+        repository.bulk_insert_gold_standard(da_inserire)
+    if da_completare:
+        repository.bulk_insert_gold_standard(da_completare)
+
+    # Divergenza nell'altro verso: righe che stanno nel database e non nei
+    # file. Non le tocco — potrebbero essere lavoro in corso — ma lo dico,
+    # perche' al prossimo avvio su una macchina pulita sparirebbero senza
+    # preavviso. E' il momento giusto per ricordarsi di esportare.
+    non_nei_file = sorted(presenti - url_nei_file)
+    if non_nei_file:
+        logger.warning(
+            "%d risorse sono nel database ma non nei file di gs_data/: "
+            "su una macchina pulita non verrebbero caricate. "
+            "Esportale con 'python3 backend/tools/gs.py esporta'. Prima tre: %s",
+            len(non_nei_file), ", ".join(non_nei_file[:3]),
+        )
+
+    return {
+        "inserite": len(da_inserire),
+        "completate": len(da_completare),
+        "gia_presenti": gia_presenti,
+        "non_nei_file": len(non_nei_file),
+    }
 
 
 def precompute_metrics() -> int:
@@ -210,28 +285,31 @@ def precompute_judgements() -> None:
     logger.info("Precalcolo dei giudizi completato")
 
 
-def initialize(gs_dir: Path, force_reload: bool = False) -> dict:
+def initialize(gs_dir: Path, force_reload: Optional[bool] = None) -> dict:
     """
     Inizializza il sistema. Chiamata una volta all'avvio del backend.
 
     Args:
         gs_dir: cartella con i JSON del Gold Standard.
-        force_reload: ricarica i JSON anche se il database e' gia' popolato.
+        force_reload: sovrascrive anche le entry gia' nel database. Se None si
+                      usa la variabile d'ambiente GS_FORCE_RELOAD.
 
     Returns:
         Riepilogo di cio' che e' stato fatto, utile nei log di avvio.
     """
+    if force_reload is None:
+        force_reload = GS_FORCE_RELOAD
+
     init_pool()
 
     already_loaded = repository.count_web_resources()
-    loaded = 0
 
-    if already_loaded == 0 or force_reload:
-        loaded = load_gold_standard_files(gs_dir)
-        logger.info("Gold Standard caricato: %d entry", loaded)
-    else:
-        logger.info("Database gia' popolato con %d risorse web, salto il caricamento",
-                    already_loaded)
+    riepilogo = load_gold_standard_files(gs_dir, force=force_reload)
+    logger.info(
+        "Gold Standard allineato: %d inserite, %d completate, %d gia' presenti%s",
+        riepilogo["inserite"], riepilogo["completate"], riepilogo["gia_presenti"],
+        f", {riepilogo['non_nei_file']} solo nel database" if riepilogo["non_nei_file"] else "",
+    )
 
     evaluated = precompute_metrics()
     logger.info("Metriche precalcolate su %d entry", evaluated)
@@ -243,7 +321,7 @@ def initialize(gs_dir: Path, force_reload: bool = False) -> dict:
         thread.start()
 
     return {
-        "gold_standard_loaded": loaded,
+        "gold_standard_loaded": riepilogo["inserite"] + riepilogo["completate"],
         "already_present": already_loaded,
         "metrics_computed": evaluated,
         "judge_scheduled": JUDGE_ON_INIT,
