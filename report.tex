@@ -150,10 +150,10 @@ token F1 pari a $1.000$ e sequence F1 pari a $0.737$.
 \toprule
 \textbf{Dominio} & \textbf{token F1} & \textbf{seq. F1} & \textbf{judge} \\
 \midrule
-morningstar.com          & 0.965 & 0.951 & 4.80 \\
-basketball-reference.com & 0.949 & 0.922 & 2.90 \\
+morningstar.com          & 0.965 & 0.951 & 5.00 \\
+basketball-reference.com & 0.949 & 0.922 & 3.20 \\
 wikipedia.org            & 0.930 & 0.951 & 4.80 \\
-tradingview.com          & 0.889 & 0.890 & 1.90 \\
+tradingview.com          & 0.889 & 0.890 & 2.80 \\
 \bottomrule
 \end{tabular}
 \caption{Metriche medie per dominio, su dieci pagine ciascuno.}
@@ -248,11 +248,11 @@ quasi esattamente al contrario di come le ordina l'F1. È la stessa
 contraddizione visibile nella tabella~\ref{tab:parser}, qui misurata invece che
 osservata.
 
-Il risultato più interessante è però nella tabella~\ref{tab:parser}, dove le
-due valutazioni si contraddicono in modo sistematico. TradingView ha il
-peggior F1 ($0.889$) e il peggior judge ($1.90$), ma Basketball-Reference ha
-il secondo miglior F1 ($0.949$) e il secondo peggior judge ($2.90$), mentre
-Wikipedia con un F1 inferiore ($0.930$) ottiene $4.80$.
+Lo stesso disaccordo si legge nella tabella~\ref{tab:parser}, in forma più
+sfumata perché lì i valori sono medie su dieci pagine.
+Basketball-Reference ha il secondo miglior F1 ($0.949$) ma il secondo peggior
+judge ($3.20$), mentre Wikipedia, con un F1 più basso ($0.930$), ottiene
+$4.80$.
 
 La spiegazione è che le due metriche rispondono a domande diverse. La metrica
 a token misura \emph{quanto} il parser ha estratto rispetto al riferimento; il
@@ -260,8 +260,14 @@ judge valuta \emph{se il risultato somiglia a un testo informativo}. Su pagine
 che sono griglie di dati --- una scheda titolo, un roster di squadra --- la
 seconda domanda ha una risposta strutturalmente bassa anche quando
 l'estrazione è corretta, perché il modello legge un elenco di numeri e non
-riconosce prosa. È esattamente il motivo per cui la consegna richiede entrambe
-le valutazioni: nessuna delle due, da sola, descriverebbe il sistema.
+riconosce prosa. Non a caso i due domini con il judge più basso —
+TradingView e Basketball-Reference — sono i due fatti di tabelle, e i due con
+il judge più alto sono quelli fatti di testo scritto.
+
+È esattamente il motivo per cui la consegna richiede entrambe le valutazioni:
+nessuna delle due, da sola, descriverebbe il sistema. E la conseguenza pratica
+è che un judge non va usato come sostituto della metrica, ma come secondo
+parere su una domanda che la metrica non pone.
 
 \section{Organizzazione del database}
 

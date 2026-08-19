@@ -88,6 +88,22 @@ KEEP_SECTIONS: frozenset[str] = frozenset({
 # reintrodurrebbe tutto il rumore che la whitelist serve a escludere.
 WRAPPER_SECTION = "symbol-overview-page-section-content"
 
+# Le pagine di notizia sono fatte in un altro modo: non widget affiancati ma
+# un articolo con titolo e paragrafi. Anche qui ci si aggancia ai 'data-qa-id'.
+ARTICLE_SECTION = "news-story-content"
+ARTICLE_TITLE = "news-description-title"
+
+# Tag di blocco da cui si legge il testo di un articolo.
+ARTICLE_BLOCKS = ("p", "h2", "h3", "li", "blockquote")
+
+# Dentro l'articolo restano comunque briciole di interfaccia: le briciole di
+# navigazione in cima, la barra laterale con i grafici, i riquadri "Ultime
+# notizie" e "Altre notizie da..." in fondo. Si rimuovono per tag semantico
+# e per prefisso di classe, che qui e' stabile mentre il suffisso e' hashato.
+ARTICLE_NOISE_TAGS = ("nav", "aside")
+ARTICLE_NOISE_PREFIXES = ("sidebar-", "latest-", "providerWidget-", "footer-",
+                          "breadcrumbs")
+
 # Tag rimossi prima di qualunque estrazione.
 NOISE_TAGS = ["script", "style", "noscript", "svg", "iframe", "canvas", "form"]
 
@@ -165,10 +181,23 @@ def _extract_title(soup) -> str:
 
 
 def _branch(url: str) -> str:
-    """Tipo di pagina, dedotto dal path."""
+    """
+    Tipo di pagina, dedotto dal path.
+
+    La distinzione fra 'news' e 'article' e' quella che conta: il primo e'
+    l'elenco delle notizie di uno strumento, che nell'HTML statico non
+    contiene niente; il secondo e' un articolo vero, con titolo e testo,
+    e va estratto come tale.
+
+        /symbols/<BORSA>-<TICKER>/         symbol
+        /symbols/<BORSA>-<TICKER>/news/    news     (elenco, non parsabile)
+        /news/<fonte>:<id>:<n>/            article  (articolo singolo)
+    """
     path = urlparse(url).path.rstrip("/")
     if path.endswith("/news"):
         return "news"
+    if path.startswith("/news/"):
+        return "article"
     if "/symbols/" in path:
         return "symbol"
     return "generic"
@@ -322,6 +351,44 @@ def _finalize(blocks: list[str]) -> str:
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
+def _render_article(soup) -> list[str]:
+    """
+    Blocchi di testo di una pagina di notizia, titolo escluso.
+
+    L'articolo sta in un contenitore 'news-story-content', ma dentro quel
+    contenitore ci sono anche le briciole di navigazione e i riquadri di
+    coda: si tolgono prima di leggere, altrimenti finirebbero nel testo
+    estratto come se fossero contenuto dell'articolo.
+    """
+    contenuto = soup.find(attrs={"data-qa-id": ARTICLE_SECTION}) or soup.find("article")
+    if contenuto is None:
+        return []
+
+    for tag in contenuto.find_all(ARTICLE_NOISE_TAGS):
+        tag.decompose()
+    for tag in contenuto.find_all(
+        lambda t: isinstance(t, Tag)
+        and any(_has_class_prefix(t, prefisso) for prefisso in ARTICLE_NOISE_PREFIXES)
+    ):
+        tag.decompose()
+
+    intestazione = soup.find(attrs={"data-qa-id": ARTICLE_TITLE}) or soup.find("h1")
+    titolo = _clean(intestazione.get_text(" ", strip=True)) if intestazione else ""
+
+    righe: list[str] = []
+    for nodo in contenuto.find_all(ARTICLE_BLOCKS):
+        # Solo i blocchi foglia: un <li> che contiene un <p> verrebbe letto
+        # due volte.
+        if nodo.find(ARTICLE_BLOCKS):
+            continue
+        testo = _clean(nodo.get_text(" ", strip=True))
+        if not _keep_line(testo) or testo == titolo:
+            continue
+        righe.append(f"- {testo}" if nodo.name == "li" else testo)
+
+    return righe
+
+
 def _looks_skeleton(soup) -> bool:
     """
     Vero se la pagina contiene solo scheletri di caricamento.
@@ -367,12 +434,23 @@ class TradingViewParser(BaseParser):
                 "dopo il caricamento: l'HTML statico contiene solo segnaposto."
             ]
 
+        if _branch(url) == "article":
+            return _render_article(soup)
+
         blocks: list[str] = []
         for section in soup.find_all(attrs={"data-qa-id": True}):
             section_id = section.get("data-qa-id")
             if section_id == WRAPPER_SECTION or section_id not in KEEP_SECTIONS:
                 continue
             blocks.extend(_render_section(section))
+
+        # Se la whitelist non ha trovato nulla la pagina non e' una scheda
+        # strumento: si prova a leggerla come articolo prima di rinunciare.
+        # E' la lezione di una pagina di notizia che, non essendo prevista,
+        # usciva con il solo titolo.
+        if not blocks:
+            return _render_article(soup)
+
         return blocks
 
     def finalize(self, blocks: list[str]) -> str:

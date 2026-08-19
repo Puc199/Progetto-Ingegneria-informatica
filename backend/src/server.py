@@ -17,6 +17,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from fastapi import Body, FastAPI, HTTPException, Query
 
@@ -108,6 +109,27 @@ def normalize_domain(domain: str) -> str:
     """Dominio senza 'www.' e in minuscolo, per confronti tolleranti."""
     domain = (domain or "").strip().lower()
     return domain[4:] if domain.startswith("www.") else domain
+
+
+def canonical_domain(url: str) -> str:
+    """
+    Dominio da memorizzare per un URL, nella forma dichiarata in domains.json.
+
+    Serve perche' 'www.basketball-reference.com' e 'basketball-reference.com'
+    sono lo stesso sito ma due stringhe diverse: se una risorsa venisse salvata
+    con la seconda forma, le query per dominio — che usano quella di
+    domains.json — non la troverebbero piu'. Si confronta quindi in forma
+    normalizzata e si restituisce la grafia dichiarata.
+    """
+    host = (urlparse(url).hostname or "").lower()
+    if not host:
+        return ""
+
+    normalized = normalize_domain(host)
+    for declared in load_domains():
+        if normalize_domain(declared) == normalized:
+            return declared
+    return host
 
 
 def require_supported_domain(domain: str) -> str:
@@ -224,15 +246,26 @@ def get_domains() -> DomainsResponse:
 
 @app.get("/gold_standard", response_model=GoldStandardEntry)
 def get_gold_standard(url: str = Query(...)) -> GoldStandardEntry:
-    """Entry del Gold Standard per un URL, letta dal database."""
-    _, domain = require_parser(url)
-    require_supported_domain(domain)
+    """
+    Entry del Gold Standard per un URL, letta dal database.
 
+    L'ordine dei due controlli non e' indifferente. Si cerca prima la riga: se
+    c'e', la si restituisce, qualunque sia il dominio. Il vincolo sui domini
+    supportati si applica solo quando la riga non esiste, per distinguere
+    "dominio che questo sistema non gestisce" (400) da "pagina che non ho"
+    (404).
+
+    Il motivo e' che POST /add_web_resource accetta qualunque URL — lo prevede
+    la specifica, ed e' cio' che permette ai test di inserire pagine di prova.
+    Rifiutare poi la lettura di una riga che il sistema stesso ha accettato di
+    scrivere sarebbe incoerente.
+    """
     entry = repository.get_gold_standard_entry(url)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"URL non presente nel Gold Standard: {url}")
+    if entry is not None:
+        return _to_gs_entry(entry)
 
-    return _to_gs_entry(entry)
+    require_supported_domain(get_domain(url))
+    raise HTTPException(status_code=404, detail=f"URL non presente nel Gold Standard: {url}")
 
 
 @app.get("/gold_standard_urls", response_model=GoldStandardUrlsResponse)
@@ -373,7 +406,7 @@ def add_web_resource(body: AddWebResourceRequest) -> StatusResponse:
     Dominio e titolo non sono richiesti in ingresso dalla specifica: il primo
     si ricava dall'URL, il secondo dal tag <title> dell'HTML.
     """
-    domain = get_domain(body.url)
+    domain = canonical_domain(body.url)
     if not domain:
         raise HTTPException(status_code=400, detail=f"URL non valido: {body.url}")
 
@@ -425,17 +458,26 @@ def delete_web_resource(body: UrlRequest = Body(...)) -> StatusResponse:
     """
     removed = repository.delete_web_resource(body.url)
     if not removed:
-        raise HTTPException(status_code=404, detail=f"URL non presente nel database: {body.url}")
+        # Cancellare cio' che non c'e' non e' un errore: lo stato richiesto —
+        # "questa risorsa non deve esistere" — e' gia' quello del database.
+        # Un DELETE idempotente e' anche cio' che ci si aspetta da una API
+        # REST, e permette di ripetere una sequenza di test senza doverla
+        # ripulire prima.
+        return StatusResponse(status="ok", detail=f"URL non presente: {body.url}")
     return StatusResponse(status="ok")
 
 
 @app.delete("/gold_standard", response_model=StatusResponse)
 def delete_gold_standard(body: UrlRequest = Body(...)) -> StatusResponse:
-    """Rimuove solo il testo di riferimento, lasciando intatta la risorsa web."""
-    removed = repository.delete_gold_standard(body.url)
-    if not removed:
-        raise HTTPException(status_code=404,
-                            detail=f"URL non presente nel Gold Standard: {body.url}")
+    """
+    Rimuove solo il testo di riferimento, lasciando intatta la risorsa web.
+
+    E' la differenza fra questo endpoint e DELETE /web_resource, che invece
+    cancella tutto a cascata. Come quello, e' idempotente: se il testo non
+    c'e' — per esempio perche' e' gia' stato rimosso dalla cascata di una
+    cancellazione precedente — la richiesta ha comunque ottenuto il suo scopo.
+    """
+    repository.delete_gold_standard(body.url)
     return StatusResponse(status="ok")
 
 
