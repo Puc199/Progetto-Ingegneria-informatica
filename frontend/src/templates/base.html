@@ -226,6 +226,20 @@
 
         .alert { border-radius: 8px; padding: .7rem .9rem; margin-bottom: 1.15rem; font-size: .89rem; }
         .alert.error { background: #fbeae8; border: 1px solid #e8c6c3; color: #8c1d18; }
+        .alert details { margin-top: .5rem; }
+        .alert summary {
+            cursor: pointer;
+            font-size: .8rem;
+            color: #a1443c;
+            width: fit-content;
+        }
+        .alert details pre {
+            margin-top: .45rem;
+            background: #fff;
+            border-color: #e8c6c3;
+            color: #7a1c16;
+            max-height: 220px;
+        }
         .alert.success { background: #e4f4ec; border: 1px solid #c1e2d0; color: #14603b; }
         .muted { color: var(--muted); font-size: .85rem; }
         .note {
@@ -315,7 +329,20 @@
         </div>
 
         <main>
-            {% if error %}<div class="alert error"><strong>Errore.</strong> {{ error }}</div>{% endif %}
+            {% if error %}
+                <div class="alert error">
+                    <strong>Errore.</strong> {{ error }}
+                    {# Il dettaglio tecnico c'e' solo se l'errore arriva da una
+                       chiamata al backend: resta richiuso, cosi' la pagina dice
+                       cosa non va senza mettere un traceback davanti a tutto. #}
+                    {% if error.detail %}
+                        <details>
+                            <summary>Dettaglio tecnico</summary>
+                            <pre>{{ error.detail }}</pre>
+                        </details>
+                    {% endif %}
+                </div>
+            {% endif %}
             {% if message %}<div class="alert success">{{ message }}</div>{% endif %}
             {% block content %}{% endblock %}
         </main>

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import time
+from dataclasses import dataclass
 from typing import Any, Optional
 
 import requests
@@ -50,26 +51,75 @@ SIDEBAR_TTL = 10.0
 _sidebar_cache: dict[str, Any] = {"expires": 0.0, "value": None}
 
 
-def _error_message(response: requests.Response) -> str:
+@dataclass(frozen=True)
+class ApiError:
     """
-    Messaggio d'errore leggibile a partire dalla risposta del backend.
+    Errore di una chiamata al backend, in due pezzi.
 
-    Il backend mette la spiegazione nel campo 'detail' di FastAPI; se manca
-    si ripiega sul testo grezzo, che e' comunque piu' utile del solo codice.
+    La consegna chiede che l'errore sia mostrato all'utente, non che gli sia
+    mostrata l'eccezione di 'requests': 'message' e' la frase che va in pagina,
+    'detail' e' il testo tecnico che serve a noi e che la UI tiene richiuso.
+    Restando una sola classe, i due pezzi non possono separarsi per strada.
+    """
+
+    message: str
+    detail: str = ""
+
+    def __str__(self) -> str:
+        # Cosi' un ApiError si comporta come la vecchia stringa ovunque venga
+        # interpolato, senza dover riscrivere tutti i punti che lo usano.
+        return self.message
+
+    def prefixed(self, label: str) -> "ApiError":
+        """Stesso errore, con l'indicazione di quale passo e' fallito."""
+        return ApiError(f"{label}: {self.message}", self.detail)
+
+
+def merge_errors(*errors: Optional[Any]) -> Optional[ApiError]:
+    """
+    Fonde piu' errori in uno solo, senza ripetizioni.
+
+    La home interroga /status e /domains: se il backend e' spento falliscono
+    tutte e due per lo stesso motivo, e scrivere due volte la stessa frase non
+    aggiunge niente per chi legge.
+    """
+    real = [e for e in errors if e]
+    if not real:
+        return None
+
+    messages: list[str] = []
+    details: list[str] = []
+    for error in real:
+        message = error.message if isinstance(error, ApiError) else str(error)
+        detail = error.detail if isinstance(error, ApiError) else ""
+        if message not in messages:
+            messages.append(message)
+        if detail and detail not in details:
+            details.append(detail)
+
+    return ApiError(" | ".join(messages), "\n".join(details))
+
+
+def _error_detail(response: requests.Response) -> str:
+    """
+    Spiegazione tecnica ricavata dalla risposta del backend.
+
+    Il backend mette il motivo nel campo 'detail' di FastAPI; se manca si
+    ripiega sul corpo grezzo, che e' comunque piu' utile del solo codice.
     """
     try:
         payload = response.json()
     except ValueError:
-        return f"HTTP {response.status_code}: {response.text[:200]}"
+        return response.text[:500]
 
     if isinstance(payload, dict) and "detail" in payload:
-        return f"HTTP {response.status_code}: {payload['detail']}"
-    return f"HTTP {response.status_code}"
+        return str(payload["detail"])
+    return response.text[:500]
 
 
 def api_call(method: str, path: str, *, params: Optional[dict] = None,
              json_body: Optional[dict] = None,
-             timeout: int = TIMEOUT_SHORT) -> tuple[Optional[dict], Optional[str]]:
+             timeout: int = TIMEOUT_SHORT) -> tuple[Optional[dict], Optional[ApiError]]:
     """
     Chiama il backend restituendo (dati, errore).
 
@@ -81,17 +131,29 @@ def api_call(method: str, path: str, *, params: Optional[dict] = None,
     try:
         response = requests.request(method, url, params=params, json=json_body, timeout=timeout)
     except requests.Timeout:
-        return None, f"Il backend non ha risposto entro {timeout} secondi."
+        return None, ApiError(
+            f"Il backend non ha risposto entro {timeout} secondi.",
+            f"Timeout su {method} {url}",
+        )
     except requests.RequestException as exc:
-        return None, f"Backend non raggiungibile: {exc}"
+        return None, ApiError(
+            f"Backend non raggiungibile all'indirizzo {API_BASE_URL}.",
+            f"{method} {url}\n{type(exc).__name__}: {exc}",
+        )
 
     if response.status_code >= 400:
-        return None, _error_message(response)
+        return None, ApiError(
+            f"Il backend ha risposto con un errore (HTTP {response.status_code}).",
+            f"{method} {url}\n{_error_detail(response)}",
+        )
 
     try:
         return response.json(), None
     except ValueError:
-        return None, "Il backend ha restituito una risposta non JSON."
+        return None, ApiError(
+            "Il backend ha restituito una risposta non JSON.",
+            f"{method} {url}\n{response.text[:500]}",
+        )
 
 
 def sidebar_state(refresh: bool = False) -> dict[str, Any]:
@@ -121,7 +183,7 @@ def sidebar_state(refresh: bool = False) -> dict[str, Any]:
     return state
 
 
-def load_domains() -> tuple[list[str], Optional[str]]:
+def load_domains() -> tuple[list[str], Optional[ApiError]]:
     """Domini supportati, usati in quasi tutte le pagine."""
     state = sidebar_state()
     return state["domains"], state["domains_error"]
@@ -182,7 +244,6 @@ def home(request: Request) -> HTMLResponse:
     # Ricaricare la home e' il modo naturale di chiedere "com'e' messo adesso
     # il sistema?": qui la cache si scavalca e i dati sono sempre freschi.
     state = sidebar_state(refresh=True)
-    errors = [e for e in (state["domains_error"], state["status_error"]) if e]
 
     return render(
         request, "home.html",
@@ -190,7 +251,7 @@ def home(request: Request) -> HTMLResponse:
         status=state["status"],
         sidebar_status=state["status"],
         sidebar_domains=state["domains"],
-        error=" | ".join(errors) if errors else None,
+        error=merge_errors(state["domains_error"], state["status_error"]),
     )
 
 
@@ -249,7 +310,7 @@ def parser_run(request: Request,
     gold_result, _ = api_call("GET", "/gold_standard", params={"url": target})
 
     eval_result = judge_result = None
-    eval_errors: list[str] = []
+    eval_errors: list[ApiError] = []
 
     if gold_result:
         payload = {
@@ -259,12 +320,12 @@ def parser_run(request: Request,
 
         eval_result, eval_error = api_call("POST", "/evaluate", json_body=payload)
         if eval_error:
-            eval_errors.append(f"Metriche: {eval_error}")
+            eval_errors.append(eval_error.prefixed("Metriche"))
 
         judge_result, judge_error = api_call("POST", "/evaluate_judge", json_body=payload,
                                              timeout=TIMEOUT_LONG)
         if judge_error:
-            eval_errors.append(f"Judge: {judge_error}")
+            eval_errors.append(judge_error.prefixed("Judge"))
 
     return render(
         request, "parser.html",
@@ -276,7 +337,7 @@ def parser_run(request: Request,
         gold_result=gold_result,
         eval_result=eval_result,
         judge_result=judge_result,
-        error=" | ".join(eval_errors) if eval_errors else None,
+        error=merge_errors(*eval_errors),
     )
 
 
@@ -360,7 +421,7 @@ def gold_standard_fetch(request: Request,
                                  timeout=TIMEOUT_LONG)
         if save_error:
             return page(fetched_url=target,
-                        error=f"Pagina scaricata ma non salvata nel database: {save_error}")
+                        error=save_error.prefixed("Pagina scaricata ma non salvata nel database"))
 
     return page(fetched_url=target, fetched=parse_result, from_db=use_db)
 
@@ -423,7 +484,7 @@ async def gold_standard_save(request: Request) -> HTMLResponse:
     _, gold_error = api_call("POST", "/add_gold_standard",
                              json_body={"url": url, "gold_text": gold_text})
     if gold_error:
-        return page(error=f"Salvataggio del gold standard fallito: {gold_error}")
+        return page(error=gold_error.prefixed("Salvataggio del gold standard fallito"))
 
     return page(message=f"Salvato: {url}")
 
@@ -494,7 +555,6 @@ def stats_page(request: Request) -> HTMLResponse:
     stats, error = api_call("GET", "/db_stats", timeout=TIMEOUT_LONG)
     schema, schema_error = api_call("GET", "/db_schema")
 
-    errors = [e for e in (error, schema_error) if e]
     domains = sorted((stats or {}).get("web_resources", {}).keys())
 
     return render(
@@ -503,7 +563,7 @@ def stats_page(request: Request) -> HTMLResponse:
         schema=schema,
         domains=domains,
         summary=stats_summary(stats, domains),
-        error=" | ".join(errors) if errors else None,
+        error=merge_errors(error, schema_error),
     )
 
 
