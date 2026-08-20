@@ -16,6 +16,7 @@ Quattro pagine, una responsabilita' ciascuna:
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Optional
 
 import requests
@@ -37,6 +38,17 @@ MATRICOLE = os.getenv("MATRICOLE", "matricola1, matricola2, matricola3")
 TIMEOUT_SHORT = 15
 TIMEOUT_LONG = 240
 
+# La barra laterale mostra stato del sistema e domini su ogni pagina: due
+# chiamate REST in piu' per ogni richiesta. Il timeout e' corto perche' una
+# barra laterale non deve mai far aspettare la pagina, e il risultato resta in
+# cache per pochi secondi: i domini arrivano da un file di configurazione e
+# cambiano solo al riavvio del backend, lo stato non ha bisogno di essere piu'
+# fresco di cosi'.
+TIMEOUT_SIDEBAR = 5
+SIDEBAR_TTL = 10.0
+
+_sidebar_cache: dict[str, Any] = {"expires": 0.0, "value": None}
+
 
 def _error_message(response: requests.Response) -> str:
     """
@@ -57,7 +69,7 @@ def _error_message(response: requests.Response) -> str:
 
 def api_call(method: str, path: str, *, params: Optional[dict] = None,
              json_body: Optional[dict] = None,
-             timeout: int = TIMEOUT_SHORT) -> tuple[Optional[Any], Optional[str]]:
+             timeout: int = TIMEOUT_SHORT) -> tuple[Optional[dict], Optional[str]]:
     """
     Chiama il backend restituendo (dati, errore).
 
@@ -82,24 +94,53 @@ def api_call(method: str, path: str, *, params: Optional[dict] = None,
         return None, "Il backend ha restituito una risposta non JSON."
 
 
+def sidebar_state(refresh: bool = False) -> dict[str, Any]:
+    """
+    Stato dei componenti e domini supportati, per la barra laterale.
+
+    Unico punto in cui la UI chiede queste due informazioni: le pagine che ne
+    hanno bisogno passano di qui, cosi' una richiesta non le domanda mai due
+    volte al backend.
+    """
+    now = time.monotonic()
+    cached = _sidebar_cache["value"]
+    if cached is not None and not refresh and now < _sidebar_cache["expires"]:
+        return cached
+
+    status, status_error = api_call("GET", "/status", timeout=TIMEOUT_SIDEBAR)
+    domains_data, domains_error = api_call("GET", "/domains", timeout=TIMEOUT_SIDEBAR)
+
+    state: dict[str, Any] = {
+        "status": status or {"backend": "error", "database": "error", "ollama": "error"},
+        "domains": (domains_data or {}).get("domains", []),
+        "status_error": status_error,
+        "domains_error": domains_error,
+    }
+    _sidebar_cache["value"] = state
+    _sidebar_cache["expires"] = now + SIDEBAR_TTL
+    return state
+
+
 def load_domains() -> tuple[list[str], Optional[str]]:
     """Domini supportati, usati in quasi tutte le pagine."""
-    data, error = api_call("GET", "/domains")
-    if error:
-        return [], error
-    return data.get("domains", []), None
+    state = sidebar_state()
+    return state["domains"], state["domains_error"]
 
 
 def load_gs_urls(domain: str) -> list[str]:
     """URL del Gold Standard di un dominio; lista vuota se qualcosa va storto."""
     data, error = api_call("GET", "/gold_standard_urls", params={"domain": domain})
-    return data.get("gold_standard_urls", []) if not error else []
+    if error or data is None:
+        return []
+    return data.get("gold_standard_urls", [])
 
 
 def load_web_resource_urls(domain: str) -> list[str]:
     """URL gia' scaricati per un dominio, con o senza testo di riferimento."""
     data, error = api_call("GET", "/web_resource_urls", params={"domain": domain})
-    return data.get("web_resource_urls", []) if not error else []
+    if error or data is None:
+        return []
+    return data.get("web_resource_urls", [])
 
 
 def load_all_gs_urls(domains: list[str]) -> list[str]:
@@ -121,6 +162,13 @@ def render(request: Request, template: str, **context: Any) -> HTMLResponse:
     context.setdefault("fetched", None)
     context.setdefault("fetched_url", "")
     context.setdefault("from_db", False)
+
+    # La barra laterale e' identica su tutte le pagine: il suo contesto lo
+    # mette qui il render, non ogni singola vista.
+    state = sidebar_state()
+    context.setdefault("sidebar_status", state["status"])
+    context.setdefault("sidebar_domains", state["domains"])
+    context.setdefault("matricole", MATRICOLE)
     return templates.TemplateResponse(request, template, {"request": request, **context})
 
 
@@ -131,16 +179,17 @@ def render(request: Request, template: str, **context: Any) -> HTMLResponse:
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request) -> HTMLResponse:
     """Stato del sistema, domini supportati e navigazione."""
-    domains, domains_error = load_domains()
-    status, status_error = api_call("GET", "/status")
-
-    errors = [e for e in (domains_error, status_error) if e]
+    # Ricaricare la home e' il modo naturale di chiedere "com'e' messo adesso
+    # il sistema?": qui la cache si scavalca e i dati sono sempre freschi.
+    state = sidebar_state(refresh=True)
+    errors = [e for e in (state["domains_error"], state["status_error"]) if e]
 
     return render(
         request, "home.html",
-        domains=domains,
-        status=status or {"backend": "error", "database": "error", "ollama": "error"},
-        matricole=MATRICOLE,
+        domains=state["domains"],
+        status=state["status"],
+        sidebar_status=state["status"],
+        sidebar_domains=state["domains"],
         error=" | ".join(errors) if errors else None,
     )
 
@@ -188,9 +237,13 @@ def parser_run(request: Request,
         timeout=TIMEOUT_SHORT if local else TIMEOUT_LONG,
     )
 
-    if parse_error:
+    # Il controllo esplicito su None non e' ridondante: api_call restituisce
+    # (dati, errore) e solo uno dei due e' valorizzato. Scriverlo qui evita che
+    # il resto della funzione lavori su un valore che potrebbe non esserci.
+    if parse_error or parse_result is None:
         return render(request, "parser.html", domains=domains, gs_urls=gs_urls,
-                      submitted_url=target, mode=mode, error=parse_error)
+                      submitted_url=target, mode=mode,
+                      error=parse_error or "Il backend non ha restituito nessun risultato.")
 
     # Il gold standard puo' non esserci: e' un caso normale, non un errore.
     gold_result, _ = api_call("GET", "/gold_standard", params={"url": target})
@@ -286,8 +339,9 @@ def gold_standard_fetch(request: Request,
     parse_result, error = api_call("POST", "/parse",
                                    json_body={"url": target, "local": use_db},
                                    timeout=TIMEOUT_SHORT if use_db else TIMEOUT_LONG)
-    if error:
-        return page(fetched_url=target, from_db=use_db, error=error)
+    if error or parse_result is None:
+        return page(fetched_url=target, from_db=use_db,
+                    error=error or "Il backend non ha restituito nessun risultato.")
 
     # La risorsa web viene salvata subito, non al momento del submit.
     #
@@ -402,6 +456,38 @@ def gold_standard_delete(request: Request,
 # Stats
 # ---------------------------------------------------------------------------
 
+def stats_summary(stats: Optional[dict], domains: list[str]) -> dict[str, Any]:
+    """
+    Quattro numeri di sintesi per i riquadri in cima alla pagina.
+
+    Il conto si fa qui e non nel template: una media dentro un ciclo Jinja e'
+    illeggibile, e le medie per dominio le calcola gia' il backend.
+    """
+    if not stats:
+        return {"resources": 0, "gold": 0, "f1": None, "judge": None}
+
+    f1_values = [
+        stats.get("avg_eval", {}).get(d, {}).get("token_level_eval", {}).get("f1")
+        for d in domains
+    ]
+    f1_values = [v for v in f1_values if v is not None]
+
+    judge_values = [
+        stats.get("avg_eval_judge", {}).get(d, {}).get("judge_score")
+        for d in domains
+    ]
+    judge_values = [v for v in judge_values if v]
+
+    return {
+        "resources": sum(stats.get("web_resources", {}).values()),
+        "gold": sum(stats.get("gold_standard", {}).values()),
+        # Media delle medie: i domini hanno lo stesso numero di entry, quindi
+        # coincide con la media generale.
+        "f1": sum(f1_values) / len(f1_values) if f1_values else None,
+        "judge": sum(judge_values) / len(judge_values) if judge_values else None,
+    }
+
+
 @app.get("/stats", response_class=HTMLResponse)
 def stats_page(request: Request) -> HTMLResponse:
     """Panoramica aggregata di tutti i domini in un'unica vista."""
@@ -416,6 +502,7 @@ def stats_page(request: Request) -> HTMLResponse:
         stats=stats,
         schema=schema,
         domains=domains,
+        summary=stats_summary(stats, domains),
         error=" | ".join(errors) if errors else None,
     )
 

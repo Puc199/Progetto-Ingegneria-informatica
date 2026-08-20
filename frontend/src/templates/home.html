@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% set active = 'home' %}
-{% block title %}Home - Pipeline di Parsing Web{% endblock %}
+{% block title %}Home - Estrattore{% endblock %}
+{% block heading %}Home{% endblock %}
+{% block subheading %}stato del sistema e panoramica della pipeline{% endblock %}
 
 {% block content %}
 <div class="card">
@@ -14,31 +16,26 @@
     </p>
 </div>
 
-<div class="grid">
-    <div class="card">
-        <h2>Stato del sistema</h2>
-        <table>
-            <tbody>
-            {% for component in ['backend', 'database', 'ollama'] %}
-                <tr>
-                    <td>{{ component }}</td>
-                    <td style="text-align:right">
-                        {% if status.get(component) == 'ok' %}
-                            <span class="badge ok">ok</span>
-                        {% else %}
-                            <span class="badge ko">error</span>
-                        {% endif %}
-                    </td>
-                </tr>
-            {% endfor %}
-            </tbody>
-        </table>
-        <p class="muted" style="margin-bottom:0">
-            Ollama risulta in errore anche mentre sta ancora scaricando il modello,
-            operazione che al primo avvio richiede diversi minuti.
-        </p>
+<div class="tiles">
+    {% for label, key in [('Backend', 'backend'), ('MariaDB', 'database'), ('Ollama', 'ollama')] %}
+        <div class="tile">
+            <div class="k">{{ label }}</div>
+            <div class="v" style="font-size:1.15rem">
+                {% if status.get(key) == 'ok' %}
+                    <span class="badge ok">attivo</span>
+                {% else %}
+                    <span class="badge ko">non risponde</span>
+                {% endif %}
+            </div>
+        </div>
+    {% endfor %}
+    <div class="tile">
+        <div class="k">Domini supportati</div>
+        <div class="v">{{ domains | length }}</div>
     </div>
+</div>
 
+<div class="grid">
     <div class="card">
         <h2>Domini supportati</h2>
         {% if domains %}
@@ -48,15 +45,23 @@
         {% else %}
             <p class="muted">Nessun dominio disponibile: il backend non risponde.</p>
         {% endif %}
+        <div class="note">
+            Ollama risulta in errore anche mentre sta ancora scaricando il modello,
+            operazione che al primo avvio richiede diversi minuti.
+        </div>
     </div>
-</div>
 
-<div class="card">
-    <h2>Le tre sezioni</h2>
-    <ul>
-        <li><strong><a href="/parser">Parser &amp; Evaluation</a></strong> — prova un parser su un URL, in modalita' live o usando l'HTML del database, e confronta il risultato con il Gold Standard.</li>
-        <li><strong><a href="/gold-standard">Gold Standard</a></strong> — scarica una pagina, incolla il testo di riferimento estratto a mano e salvali insieme nel database.</li>
-        <li><strong><a href="/stats">Statistiche</a></strong> — conteggi, metriche medie e giudizio medio dell'LLM, per ogni dominio.</li>
-    </ul>
+    <div class="card">
+        <h2>Le tre sezioni</h2>
+        <ul>
+            <li><strong><a href="/parser">Parser &amp; Evaluation</a></strong> — prova un parser su un URL, in modalita' live o usando l'HTML del database, e confronta il risultato con il Gold Standard.</li>
+            <li><strong><a href="/gold-standard">Gold Standard</a></strong> — scarica una pagina, incolla il testo di riferimento estratto a mano e salvali insieme nel database.</li>
+            <li><strong><a href="/stats">Statistiche</a></strong> — conteggi, metriche medie e giudizio medio dell'LLM, per ogni dominio.</li>
+        </ul>
+        <p class="muted" style="margin-bottom:0">
+            Lo stato dei componenti nella barra a sinistra si aggiorna a ogni pagina;
+            ricaricare la home forza un controllo immediato.
+        </p>
+    </div>
 </div>
 {% endblock %}

@@ -1,11 +1,35 @@
 {% extends "base.html" %}
 {% set active = 'stats' %}
-{% block title %}Statistiche{% endblock %}
+{% block title %}Statistiche - Estrattore{% endblock %}
+{% block heading %}Statistiche{% endblock %}
+{% block subheading %}conteggi, metriche medie e giudizio dell'LLM per dominio{% endblock %}
 
 {% block content %}
 {% if not stats %}
     <div class="card"><p class="muted" style="margin:0">Nessuna statistica disponibile.</p></div>
 {% else %}
+
+<div class="tiles">
+    <div class="tile">
+        <div class="k">Risorse web</div>
+        <div class="v">{{ summary.resources }}</div>
+    </div>
+    <div class="tile">
+        <div class="k">Entry gold standard</div>
+        <div class="v">{{ summary.gold }}</div>
+    </div>
+    <div class="tile">
+        <div class="k">F1 medio (token)</div>
+        <div class="v">{{ '%.2f' | format(summary.f1) if summary.f1 is not none else '—' }}</div>
+    </div>
+    <div class="tile">
+        <div class="k">Judge medio</div>
+        <div class="v">
+            {% if summary.judge is not none %}{{ '%.2f' | format(summary.judge) }}<small>/5</small>{% else %}—{% endif %}
+        </div>
+    </div>
+</div>
+
 <div class="card">
     <h2>Risorse nel database</h2>
     <table>
@@ -45,10 +69,10 @@
         {% endfor %}
         </tbody>
     </table>
-    <p class="muted" style="margin-bottom:0">
+    <div class="note" style="margin-top:.8rem">
         Soglie di riferimento per l'F1 di token_level_eval: sotto 0.60 scarso,
         fra 0.60 e 0.80 medio, sopra 0.80 buono.
-    </p>
+    </div>
 </div>
 
 <div class="card">
@@ -80,7 +104,7 @@
 <div class="card">
     <h2>Schema del database</h2>
     {% for table, columns in schema.items() %}
-        <h2 style="font-size:.92rem">{{ table }}</h2>
+        <h2 style="font-size:.9rem">{{ table }}</h2>
         <table style="margin-bottom:1rem">
             <thead><tr><th>Colonna</th><th>Tipo e chiavi</th></tr></thead>
             <tbody>

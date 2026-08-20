@@ -1,25 +1,28 @@
 {% extends "base.html" %}
 {% set active = 'parser' %}
-{% block title %}Parser & Evaluation{% endblock %}
+{% block title %}Parser & Evaluation - Estrattore{% endblock %}
+{% block heading %}Parser &amp; Evaluation{% endblock %}
+{% block subheading %}estrazione del testo e confronto con il Gold Standard{% endblock %}
 
 {% block content %}
 <div class="card">
     <h2>Prova un parser</h2>
     <form action="/parser" method="post">
-        <div class="field">
-            <label for="url">URL da analizzare</label>
-            <input type="text" id="url" name="url" placeholder="https://en.wikipedia.org/wiki/Minerva"
-                   value="{{ submitted_url or '' }}">
-        </div>
-
-        <div class="field">
-            <label for="gs_url">oppure scegline uno gia' nel Gold Standard</label>
-            <select id="gs_url" name="gs_url">
-                <option value="">— nessuna selezione —</option>
-                {% for url in gs_urls %}
-                    <option value="{{ url }}" {% if url == submitted_url %}selected{% endif %}>{{ url }}</option>
-                {% endfor %}
-            </select>
+        <div class="row" style="margin-bottom:.9rem">
+            <div class="field">
+                <label for="url">URL da analizzare</label>
+                <input type="text" id="url" name="url" placeholder="https://en.wikipedia.org/wiki/Minerva"
+                       value="{{ submitted_url or '' }}">
+            </div>
+            <div class="field">
+                <label for="gs_url">oppure scegline uno gia' nel Gold Standard</label>
+                <select id="gs_url" name="gs_url">
+                    <option value="">— nessuna selezione —</option>
+                    {% for url in gs_urls %}
+                        <option value="{{ url }}" {% if url == submitted_url %}selected{% endif %}>{{ url }}</option>
+                    {% endfor %}
+                </select>
+            </div>
         </div>
 
         <div class="field">
@@ -38,11 +41,54 @@
 </div>
 
 {% if parse_result %}
+    {% set token = eval_result.token_level_eval if eval_result else None %}
+
+    {% if token or judge_result %}
+    <div class="tiles">
+        <div class="tile">
+            <div class="k">Precision</div>
+            <div class="v">{{ '%.2f' | format(token.precision) if token else '—' }}</div>
+        </div>
+        <div class="tile">
+            <div class="k">Recall</div>
+            <div class="v">{{ '%.2f' | format(token.recall) if token else '—' }}</div>
+        </div>
+        <div class="tile">
+            <div class="k">F1</div>
+            <div class="v">{{ '%.2f' | format(token.f1) if token else '—' }}</div>
+        </div>
+        <div class="tile">
+            <div class="k">LLM Judge</div>
+            <div class="v">
+                {% if judge_result %}{{ judge_result.judge_score }}<small>/5</small>{% else %}—{% endif %}
+            </div>
+        </div>
+        <div class="tile span2">
+            <div class="k">Giudizio complessivo</div>
+            <div class="body">
+                {% if judge_result %}
+                    {{ judge_result.judge_feedback }}
+                    <div class="muted" style="margin-top:.4rem">
+                        {{ judge_result.model_name }} ·
+                        {% if judge_result.parse_ok %}
+                            <span class="badge ok">JSON rispettato</span>
+                        {% else %}
+                            <span class="badge ko">fallback</span>
+                        {% endif %}
+                    </div>
+                {% else %}
+                    Nessun giudizio disponibile per questa pagina.
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="card">
-        <h2>Risultato</h2>
+        <h2>Risultato del parsing</h2>
         <table>
             <tbody>
-                <tr><th>URL</th><td>{{ parse_result.url }}</td></tr>
+                <tr><th>URL</th><td style="word-break:break-all">{{ parse_result.url }}</td></tr>
                 <tr><th>Dominio</th><td>{{ parse_result.domain }}</td></tr>
                 <tr><th>Titolo</th><td>{{ parse_result.title }}</td></tr>
                 <tr><th>Dimensioni</th>
@@ -69,7 +115,7 @@
 {% if gold_result %}
     <div class="card">
         <h2>gold_text (riferimento)</h2>
-        <pre>{{ gold_result.gold_text }}</pre>
+        <pre class="tall">{{ gold_result.gold_text }}</pre>
     </div>
 {% elif parse_result %}
     <div class="card">
@@ -82,7 +128,7 @@
 
 {% if eval_result %}
     <div class="card">
-        <h2>Metriche automatiche</h2>
+        <h2>Metriche automatiche, per esteso</h2>
         <table>
             <thead><tr><th>Metrica</th><th class="num">Precision</th><th class="num">Recall</th><th class="num">F1</th></tr></thead>
             <tbody>
@@ -98,27 +144,12 @@
             {% endfor %}
             </tbody>
         </table>
-        <p class="muted" style="margin-bottom:0">
-            <strong>token_level_eval</strong> confronta gli insiemi di token: misura contenuto e rumore,
-            ignora ordine e ripetizioni. <strong>sequence_eval</strong> confronta le sequenze: penalizza
-            i blocchi ripetuti e il testo giusto ma scomposto.
-        </p>
-    </div>
-{% endif %}
-
-{% if judge_result %}
-    <div class="card">
-        <h2>Giudizio dell'LLM</h2>
-        <table>
-            <tbody>
-                <tr><th>Modello</th><td>{{ judge_result.model_name }}</td></tr>
-                <tr><th>Punteggio</th><td><strong>{{ judge_result.judge_score }}</strong> / 5</td></tr>
-                <tr><th>Feedback</th><td>{{ judge_result.judge_feedback }}</td></tr>
-                <tr><th>Formato JSON</th>
-                    <td>{% if judge_result.parse_ok %}<span class="badge ok">rispettato</span>
-                        {% else %}<span class="badge ko">fallback</span>{% endif %}</td></tr>
-            </tbody>
-        </table>
+        <div class="note" style="margin-top:.8rem">
+            I riquadri in alto riportano <strong>token_level_eval</strong>, che confronta gli insiemi
+            di token: misura contenuto e rumore, ignora ordine e ripetizioni.
+            <strong>sequence_eval</strong> confronta le sequenze: penalizza i blocchi ripetuti e il
+            testo giusto ma scomposto. Per questo vanno letti insieme.
+        </div>
     </div>
 {% endif %}
 {% endblock %}

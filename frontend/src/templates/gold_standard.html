@@ -1,13 +1,14 @@
 {% extends "base.html" %}
 {% set active = 'gold' %}
-{% block title %}Gold Standard Builder{% endblock %}
+{% block title %}Gold Standard - Estrattore{% endblock %}
+{% block heading %}Gold Standard Builder{% endblock %}
+{% block subheading %}scarica una pagina e scrivi il testo di riferimento{% endblock %}
 
 {% block content %}
 <div class="card">
-    <h2>Dominio</h2>
     <form action="/gold-standard" method="get" class="row">
         <div class="field">
-            <label for="domain">Scegli il dominio su cui lavorare</label>
+            <label for="domain">Dominio su cui lavorare</label>
             <select id="domain" name="domain">
                 {% for d in domains %}
                     <option value="{{ d }}" {% if d == selected_domain %}selected{% endif %}>{{ d }}</option>
@@ -18,68 +19,85 @@
     </form>
 </div>
 
-<div class="card">
-    <h2>1a. Completa una pagina gia' scaricata ({{ pending_urls | length }} in attesa)</h2>
-    {% if pending_urls %}
-        <form action="/gold-standard/fetch" method="post" class="row">
-            <input type="hidden" name="domain" value="{{ selected_domain }}">
-            <input type="hidden" name="source" value="db">
-            <div class="field">
-                <label for="db_url">Pagine con l'HTML gia' nel database, in attesa del gold_text</label>
-                <select id="db_url" name="db_url">
-                    {% for url in pending_urls %}
-                        <option value="{{ url }}" {% if url == fetched_url %}selected{% endif %}>{{ url }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <button type="submit">Apri</button>
-        </form>
-        <p class="muted" style="margin-bottom:0">
-            Riusa l'HTML gia' salvato, senza riscaricare niente. E' la via da seguire per
-            i domini che rifiutano le richieste automatiche: un nuovo download
-            restituirebbe una pagina di errore e sovrascriverebbe l'HTML buono.
-        </p>
-    {% else %}
-        <p class="muted" style="margin:0">
-            Nessuna pagina in attesa: tutte quelle scaricate hanno gia' un testo di riferimento.
-        </p>
-    {% endif %}
+<div class="tiles">
+    <div class="tile">
+        <div class="k">Entry complete</div>
+        <div class="v">{{ gs_urls | length }}</div>
+    </div>
+    <div class="tile">
+        <div class="k">In attesa di gold_text</div>
+        <div class="v">{{ pending_urls | length }}</div>
+    </div>
+    <div class="tile span2">
+        <div class="k">Dominio selezionato</div>
+        <div class="v" style="font-size:1.1rem; word-break:break-all">{{ selected_domain or '—' }}</div>
+    </div>
 </div>
 
-<div class="card">
-    <h2>1b. Oppure scarica una pagina nuova</h2>
-    <form action="/gold-standard/fetch" method="post" class="row">
-        <input type="hidden" name="domain" value="{{ selected_domain }}">
-        <input type="hidden" name="source" value="live">
-        <div class="field">
-            <label for="fetch_url">URL della pagina da aggiungere</label>
-            <input type="text" id="fetch_url" name="url"
-                   placeholder="https://{{ selected_domain }}/..."
-                   value="{% if not from_db %}{{ fetched_url or '' }}{% endif %}">
-        </div>
-        <button type="submit">Scarica</button>
-    </form>
-    <p class="muted" style="margin-bottom:0">
-        Il download usa lo stesso percorso del parser, quindi l'HTML salvato e'
-        esattamente quello su cui il parser verra' valutato.
-    </p>
+<div class="grid">
+    <div class="card">
+        <h2>1a. Completa una pagina gia' scaricata</h2>
+        {% if pending_urls %}
+            <form action="/gold-standard/fetch" method="post" class="row">
+                <input type="hidden" name="domain" value="{{ selected_domain }}">
+                <input type="hidden" name="source" value="db">
+                <div class="field">
+                    <label for="db_url">Pagine con l'HTML gia' nel database</label>
+                    <select id="db_url" name="db_url">
+                        {% for url in pending_urls %}
+                            <option value="{{ url }}" {% if url == fetched_url %}selected{% endif %}>{{ url }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <button type="submit">Apri</button>
+            </form>
+            <p class="muted" style="margin-bottom:0">
+                Riusa l'HTML gia' salvato, senza riscaricare niente. E' la via da seguire per
+                i domini che rifiutano le richieste automatiche: un nuovo download
+                restituirebbe una pagina di errore e sovrascriverebbe l'HTML buono.
+            </p>
+        {% else %}
+            <p class="muted" style="margin:0">
+                Nessuna pagina in attesa: tutte quelle scaricate hanno gia' un testo di riferimento.
+            </p>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2>1b. Oppure scarica una pagina nuova</h2>
+        <form action="/gold-standard/fetch" method="post" class="row">
+            <input type="hidden" name="domain" value="{{ selected_domain }}">
+            <input type="hidden" name="source" value="live">
+            <div class="field">
+                <label for="fetch_url">URL della pagina da aggiungere</label>
+                <input type="text" id="fetch_url" name="url"
+                       placeholder="https://{{ selected_domain }}/..."
+                       value="{% if not from_db %}{{ fetched_url or '' }}{% endif %}">
+            </div>
+            <button type="submit">Scarica</button>
+        </form>
+        <p class="muted" style="margin-bottom:0">
+            Il download usa lo stesso percorso del parser, quindi l'HTML salvato e'
+            esattamente quello su cui il parser verra' valutato.
+        </p>
+    </div>
 </div>
 
 {% if fetched %}
 <div class="card">
     <h2>2. Copia il testo informativo e incollalo qui sotto</h2>
     <p class="muted" style="margin-top:0">
-        Pagina: <strong>{{ fetched.url }}</strong> —
+        Pagina: <strong style="word-break:break-all">{{ fetched.url }}</strong> —
         HTML {% if from_db %}letto dal database{% else %}scaricato e salvato nel database{% endif %},
         {{ fetched.html_text | length }} caratteri.
     </p>
-    <p class="muted">
+    <div class="note">
         Apri la pagina nel browser e seleziona a mano <strong>solo</strong> titolo e corpo:
         niente menu di navigazione, footer, sidebar o banner. Il testo di riferimento va
         in testo semplice, senza Markdown.
-    </p>
+    </div>
 
-    <div class="grid" style="margin-bottom:1rem">
+    <div class="grid" style="margin:1rem 0">
         <div>
             <h2 style="margin-top:0">html_text scaricato</h2>
             <pre>{{ fetched.html_text[:12000] }}{% if fetched.html_text | length > 12000 %}
@@ -118,7 +136,7 @@
     <h2>Entry gia' presenti per {{ selected_domain or '—' }} ({{ gs_urls | length }})</h2>
     {% if gs_urls %}
         <table>
-            <thead><tr><th>URL</th><th style="width:230px">Azioni</th></tr></thead>
+            <thead><tr><th>URL</th><th style="width:240px">Azioni</th></tr></thead>
             <tbody>
             {% for url in gs_urls %}
                 <tr>
