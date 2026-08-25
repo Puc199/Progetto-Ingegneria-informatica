@@ -61,7 +61,7 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-ministral-3:3b}
       # Un solo modello in memoria e tenuto caldo: su CPU il caricamento
       # pesa piu' della generazione.
-      OLLAMA_KEEP_ALIVE: 5m
+      OLLAMA_KEEP_ALIVE: 30m
       OLLAMA_MAX_LOADED_MODELS: "1"
     ports:
       - "11434:11434"
